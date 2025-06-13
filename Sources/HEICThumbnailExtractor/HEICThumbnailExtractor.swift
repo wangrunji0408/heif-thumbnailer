@@ -14,22 +14,12 @@ import UniformTypeIdentifiers
 
 private let logger = Logger(label: "com.hdremote.HEICThumbnailExtractor")
 
-/// Efficiently read the first thumbnail from a HEIC file with minimal read operations
-/// - Parameters:
-///   - readAt: Async function to read data at specific offset and length
-///   - minShortSide: Minimum short side length in pixels. Returns the smallest thumbnail that meets this requirement. If nil, returns the first available thumbnail.
-/// - Returns: Data of the first thumbnail, or nil if extraction fails
-public func readHEICThumbnail(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data, minShortSide: UInt32? = nil
-) async throws
-    -> Data?
-{
-    if let result = try await readHEICThumbnailWithRotation(
-        readAt: readAt, minShortSide: minShortSide)
-    {
-        return result.data
-    }
-    return nil
+public struct Thumbnail {
+    public let data: Data
+    public let rotation: Int
+    public let type: String
+    public let width: UInt32
+    public let height: UInt32
 }
 
 /// Efficiently read the first thumbnail from a HEIC file with minimal read operations, including rotation info
@@ -37,10 +27,10 @@ public func readHEICThumbnail(
 ///   - readAt: Async function to read data at specific offset and length
 ///   - minShortSide: Minimum short side length in pixels. Returns the smallest thumbnail that meets this requirement. If nil, returns the first available thumbnail.
 /// - Returns: Tuple containing thumbnail data and rotation angle, or nil if extraction fails
-public func readHEICThumbnailWithRotation(
+public func readHEICThumbnail(
     readAt: @escaping (UInt64, UInt32) async throws -> Data, minShortSide: UInt32? = nil
 )
-    async throws -> (data: Data, rotation: Int)?
+    async throws -> Thumbnail?
 {
     // Step 1: Read file header, verify HEIC format and find meta box
     let headerData = try await readAt(0, 2048)  // Read first 2KB
@@ -170,7 +160,11 @@ public func readHEICThumbnailWithRotation(
         // Check if it's JPEG data (FF D8 FF)
         if headerBytes[0] == 0xFF && headerBytes[1] == 0xD8 && headerBytes[2] == 0xFF {
             logger.debug("Detected JPEG thumbnail")
-            return (data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0)
+            return Thumbnail(
+                data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0, type: "jpeg",
+                width: thumbnailInfo.imageSize?.width ?? 0,
+                height: thumbnailInfo.imageSize?.height ?? 0
+            )
         }
 
         // Check if it's HEVC data (usually starts with NAL unit)
@@ -179,7 +173,11 @@ public func readHEICThumbnailWithRotation(
         {
             logger.debug("Detected standard HEVC NAL unit")
             if let heicData = try await createHEICFromHEVC(thumbnailData) {
-                return (data: heicData, rotation: thumbnailInfo.rotation ?? 0)
+                return Thumbnail(
+                    data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
+                    width: thumbnailInfo.imageSize?.width ?? 0,
+                    height: thumbnailInfo.imageSize?.height ?? 0
+                )
             }
         }
 
@@ -189,7 +187,11 @@ public func readHEICThumbnailWithRotation(
             if nalLength > 0 && nalLength < thumbnailData.count {
                 logger.debug("Detected HEVC length prefix format")
                 if let heicData = try await createHEICFromHEVC(thumbnailData) {
-                    return (data: heicData, rotation: thumbnailInfo.rotation ?? 0)
+                    return Thumbnail(
+                        data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
+                        width: thumbnailInfo.imageSize?.width ?? 0,
+                        height: thumbnailInfo.imageSize?.height ?? 0
+                    )
                 }
             }
         }
@@ -198,7 +200,11 @@ public func readHEICThumbnailWithRotation(
         if headerBytes[0] == 0x01 {  // Might be other HEVC format
             logger.debug("Detected HEVC data, attempting to wrap as HEIC")
             if let heicData = try await createHEICFromHEVC(thumbnailData) {
-                return (data: heicData, rotation: thumbnailInfo.rotation ?? 0)
+                return Thumbnail(
+                    data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
+                    width: thumbnailInfo.imageSize?.width ?? 0,
+                    height: thumbnailInfo.imageSize?.height ?? 0
+                )
             }
         }
 
@@ -206,7 +212,11 @@ public func readHEICThumbnailWithRotation(
         logger.debug("Unrecognized data format, returning raw data")
     }
 
-    return (data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0)
+    return Thumbnail(
+        data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0, type: "unknown",
+        width: thumbnailInfo.imageSize?.width ?? 0,
+        height: thumbnailInfo.imageSize?.height ?? 0
+    )
 }
 
 // MARK: - HEIC Structure and Functions
@@ -931,45 +941,6 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
     return associations
 }
 
-/// Find mdat box
-private func findMdatBox(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data, startOffset: UInt64
-) async throws -> MdatInfo? {
-    var searchOffset = startOffset
-    let chunkSize: UInt32 = 4096
-
-    for _ in 0..<20 {  // Search up to 20 chunks
-        let searchData = try await readAt(searchOffset, chunkSize)
-        guard searchData.count >= 8 else { break }
-
-        var localOffset: UInt64 = 0
-        while localOffset + 8 < searchData.count {
-            let savedOffset = localOffset
-            guard let (boxSize, boxType) = parseBoxHeader(data: searchData, offset: &localOffset)
-            else {
-                break
-            }
-
-            if boxType == "mdat" {
-                let mdatOffset = searchOffset + savedOffset
-                let dataOffset = mdatOffset + 8  // mdat data starts after box header
-                return MdatInfo(offset: mdatOffset, size: boxSize, dataOffset: dataOffset)
-            }
-
-            // Move to next possible box position
-            if boxSize > 8 && boxSize < chunkSize {
-                localOffset = savedOffset + UInt64(boxSize)
-            } else {
-                localOffset += 4  // Small step forward
-            }
-        }
-
-        searchOffset += UInt64(chunkSize - 8)  // Overlapping search
-    }
-
-    return nil
-}
-
 /// Wrap HEVC data as a complete HEIC file
 private func createHEICFromHEVC(_ hevcData: Data) async throws -> Data? {
     // Create a complete HEIC container to wrap HEVC data
@@ -1441,7 +1412,7 @@ public func readHEICThumbnailAsImage(
     async throws -> PlatformImage?
 {
     guard
-        let result = try await readHEICThumbnailWithRotation(
+        let result = try await readHEICThumbnail(
             readAt: readAt, minShortSide: minShortSide)
     else {
         return nil

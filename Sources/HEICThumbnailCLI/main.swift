@@ -59,26 +59,17 @@ struct HEICThumbnailCLI: AsyncParsableCommand {
             }
 
             // extract thumbnail data
-            if let thumbnailData = try await readHEICThumbnail(
+            if let thumbnail = try await readHEICThumbnail(
                 readAt: readAt, minShortSide: shortSideLength
             ) {
-                logger.info("success to extract thumbnail, size: \(thumbnailData.count) bytes")
+                logger.info(
+                    "success to extract thumbnail, size: \(thumbnail.data.count) bytes, type: \(thumbnail.type), rotation: \(thumbnail.rotation), image size: \(thumbnail.width)x\(thumbnail.height)"
+                )
 
                 // save thumbnail data
-                let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.jpg")
-                try thumbnailData.write(to: outputURL)
+                let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(thumbnail.type)")
+                try thumbnail.data.write(to: outputURL)
                 logger.info("thumbnail saved to: \(outputURL.path)")
-
-                // try to create image object to validate
-                if let image = createImageFromThumbnailData(thumbnailData) {
-                    #if canImport(UIKit)
-                        logger.info("image size: \(image.size.width) x \(image.size.height)")
-                    #elseif canImport(AppKit)
-                        logger.info("image size: \(image.size.width) x \(image.size.height)")
-                    #endif
-                } else {
-                    logger.warning("fail to create image from thumbnail data")
-                }
             } else {
                 logger.error("fail to extract thumbnail from file")
             }
