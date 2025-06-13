@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
+            "name": "Debug HEICThumbnailCLI",
+            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/debug/HEICThumbnailCLI",
+            "preLaunchTask": "swift: Build Debug HEICThumbnailCLI"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
+            "name": "Release HEICThumbnailCLI",
+            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/release/HEICThumbnailCLI",
+            "preLaunchTask": "swift: Build Release HEICThumbnailCLI"
+        }
+    ]
+}

@@ -73,4 +73,91 @@ final class HEICThumbnailExtractorTests: XCTestCase {
             XCTFail("fail to extract thumbnail: \(error)")
         }
     }
+
+    func testExtractThumbnailWithMinShortSide() async throws {
+        // get test file path
+        guard let testFileURL = Bundle.module.url(forResource: "SonyHLG", withExtension: "HIF")
+        else {
+            XCTFail("fail to find SonyHLG.HIF")
+            return
+        }
+
+        print("test file path: \(testFileURL.path)")
+
+        // create file handle
+        let fileHandle = try FileHandle(forReadingFrom: testFileURL)
+        defer { fileHandle.closeFile() }
+
+        // create read function
+        let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
+            try fileHandle.seek(toOffset: offset)
+            let data = fileHandle.readData(ofLength: Int(length))
+            return data
+        }
+
+        // test with different minShortSide values
+        let testCases: [UInt32?] = [nil, 100, 200, 500, 1000]
+
+        for minShortSide in testCases {
+            print("\n--- Testing with minShortSide: \(minShortSide?.description ?? "nil") ---")
+
+            do {
+                let result = try await readHEICThumbnailWithRotation(
+                    readAt: readAt, minShortSide: minShortSide)
+
+                if let result = result {
+                    print(
+                        "success to extract thumbnail, size: \(result.data.count) bytes, rotation: \(result.rotation) degrees"
+                    )
+                    XCTAssertGreaterThan(result.data.count, 0, "thumbnail data should not be empty")
+
+                    // validate data is valid image data
+                    let image = createImageFromThumbnailData(result.data, rotation: result.rotation)
+                    XCTAssertNotNil(image, "should be able to create image from thumbnail data")
+
+                    if let image = image {
+                        #if canImport(UIKit)
+                            let imageSize = image.size
+                            print("thumbnail size: \(imageSize.width) x \(imageSize.height)")
+                            let shortSide = min(imageSize.width, imageSize.height)
+                            print("short side: \(shortSide)")
+
+                            // verify that the returned thumbnail meets the minShortSide requirement
+                            if let minShortSide = minShortSide {
+                                XCTAssertGreaterThanOrEqual(
+                                    shortSide, CGFloat(minShortSide),
+                                    "thumbnail short side should be >= \(minShortSide)")
+                            }
+                        #elseif canImport(AppKit)
+                            let imageSize = image.size
+                            print("thumbnail size: \(imageSize.width) x \(imageSize.height)")
+                            let shortSide = min(imageSize.width, imageSize.height)
+                            print("short side: \(shortSide)")
+
+                            // verify that the returned thumbnail meets the minShortSide requirement
+                            if let minShortSide = minShortSide {
+                                XCTAssertGreaterThanOrEqual(
+                                    shortSide, CGFloat(minShortSide),
+                                    "thumbnail short side should be >= \(minShortSide)")
+                            }
+                        #endif
+                    }
+
+                } else {
+                    if let minShortSide = minShortSide {
+                        print(
+                            "no thumbnail found that meets minShortSide requirement of \(minShortSide)"
+                        )
+                        // This might be expected if the requirement is too high
+                    } else {
+                        XCTFail("fail to extract thumbnail when no minShortSide specified")
+                    }
+                }
+            } catch {
+                XCTFail(
+                    "fail to extract thumbnail with minShortSide \(minShortSide?.description ?? "nil"): \(error)"
+                )
+            }
+        }
+    }
 }

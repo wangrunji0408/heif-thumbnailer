@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import HEICThumbnailExtractor
 import Logging
@@ -5,14 +6,22 @@ import Logging
 private let logger = Logger(label: "com.hdremote.HEICThumbnailCLI")
 
 @main
-struct HEICThumbnailCLI {
-    static func main() async {
-        guard CommandLine.arguments.count > 1 else {
-            print("Usage: HEICThumbnailCLI <HEIC file path> [output path]")
-            print("Example: HEICThumbnailCLI input.heic output.jpg")
-            return
-        }
+struct HEICThumbnailCLI: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "HEICThumbnailCLI",
+        abstract: "A tool to generate thumbnails from HEIC images."
+    )
 
+    @Argument(help: "The path to the HEIC file")
+    var heicFilePath: String
+
+    @Option(name: .shortAndLong, help: "The length of the thumbnail's short side")
+    var shortSideLength: UInt32?
+
+    @Option(name: .shortAndLong, help: "The output path for the thumbnail")
+    var outputPath: String?
+
+    func run() async throws {
         LoggingSystem.bootstrap { label in
             var handler = StreamLogHandler.standardOutput(label: label)
 
@@ -28,16 +37,12 @@ struct HEICThumbnailCLI {
             return handler
         }
 
-        let inputPath = CommandLine.arguments[1]
-        let outputPath =
-            CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "thumbnail.jpg"
-
         do {
-            let fileURL = URL(fileURLWithPath: inputPath)
+            let fileURL = URL(fileURLWithPath: heicFilePath)
             let fileHandle = try FileHandle(forReadingFrom: fileURL)
             defer { fileHandle.closeFile() }
 
-            logger.info("extracting thumbnail from \(inputPath)...")
+            logger.info("extracting thumbnail from \(heicFilePath)...")
 
             // create read function
             let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
@@ -54,13 +59,15 @@ struct HEICThumbnailCLI {
             }
 
             // extract thumbnail data
-            if let thumbnailData = try await readHEICThumbnail(readAt: readAt) {
+            if let thumbnailData = try await readHEICThumbnail(
+                readAt: readAt, minShortSide: shortSideLength
+            ) {
                 logger.info("success to extract thumbnail, size: \(thumbnailData.count) bytes")
 
                 // save thumbnail data
-                let outputURL = URL(fileURLWithPath: outputPath)
+                let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.jpg")
                 try thumbnailData.write(to: outputURL)
-                logger.info("thumbnail saved to: \(outputPath)")
+                logger.info("thumbnail saved to: \(outputURL.path)")
 
                 // try to create image object to validate
                 if let image = createImageFromThumbnailData(thumbnailData) {
