@@ -879,7 +879,7 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
 
     logger.debug("Property association entry count: \(entryCount)")
 
-    for i in 0..<entryCount {  // Remove 50 item limit
+    for i in 0..<entryCount {
         guard offset + 2 < data.count else {
             logger.debug("Insufficient data, parsed \(i) property associations, stopping")
             break
@@ -890,7 +890,10 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
         let itemId = itemIdData.withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
         offset += 2
 
-        guard offset + 1 < data.count else { break }
+        guard offset + 1 < data.count else {
+            logger.debug("Insufficient data for association count, item \(itemId)")
+            break
+        }
 
         // Read association count
         let associationCount = data[offset]
@@ -901,7 +904,12 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
         var propertyIndices: [UInt32] = []
 
         for j in 0..<associationCount {
-            guard offset + 1 < data.count else { break }
+            guard offset < data.count else {
+                logger.debug(
+                    "Insufficient data for property index \(j), item \(itemId), offset: \(offset), data count: \(data.count)"
+                )
+                break
+            }
 
             // Read property index (1 byte, essential flag in highest bit)
             let propertyByte = data[offset]
