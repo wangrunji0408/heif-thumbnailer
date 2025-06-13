@@ -32,35 +32,35 @@ public func readHEICThumbnail(readAt: @escaping (UInt64, UInt32) async throws ->
 public func readHEICThumbnailWithRotation(readAt: @escaping (UInt64, UInt32) async throws -> Data)
     async throws -> (data: Data, rotation: Int)?
 {
-    // 第一步：读取文件头，验证HEIC格式并找到meta box
-    let headerData = try await readAt(0, 2048)  // 读取前2KB
+    // Step 1: Read file header, verify HEIC format and find meta box
+    let headerData = try await readAt(0, 2048)  // Read first 2KB
     guard headerData.count >= 8 else { return nil }
 
     var offset: UInt64 = 0
 
-    // 解析ftyp box
+    // Parse ftyp box
     guard let (ftypSize, ftypType) = parseBoxHeader(data: headerData, offset: &offset),
         ftypType == "ftyp"
     else {
-        logger.error("不是有效的HEIC文件：缺少ftyp box")
+        logger.error("Not a valid HEIC file: missing ftyp box")
         return nil
     }
 
-    // 验证品牌
+    // Verify brand
     if ftypSize >= 12 && offset + 4 <= headerData.count {
         let brandData = headerData.subdata(in: Int(offset)..<Int(offset + 4))
         let brand = String(data: brandData, encoding: .ascii) ?? ""
         guard brand.hasPrefix("hei") else {
-            logger.error("不是HEIC文件，品牌: \(brand)")
+            logger.error("Not a HEIC file, brand: \(brand)")
             return nil
         }
-        logger.debug("检测到HEIC文件，品牌: \(brand)")
+        logger.debug("Detected HEIC file, brand: \(brand)")
     }
 
-    // 跳过ftyp box
+    // Skip ftyp box
     offset = UInt64(ftypSize)
 
-    // 在header数据中查找meta box
+    // Search for meta box in header data
     var metaOffset: UInt64 = 0
     var metaSize: UInt32 = 0
 
@@ -73,11 +73,11 @@ public func readHEICThumbnailWithRotation(readAt: @escaping (UInt64, UInt32) asy
         if boxType == "meta" {
             metaOffset = savedOffset
             metaSize = boxSize
-            logger.debug("找到meta box: offset=\(metaOffset), size=\(metaSize)")
+            logger.debug("Found meta box: offset=\(metaOffset), size=\(metaSize)")
             break
         }
 
-        // 移动到下一个box
+        // Move to next box
         if boxSize > 8 && savedOffset + UInt64(boxSize) <= headerData.count {
             offset = savedOffset + UInt64(boxSize)
         } else {
@@ -85,9 +85,9 @@ public func readHEICThumbnailWithRotation(readAt: @escaping (UInt64, UInt32) asy
         }
     }
 
-    // 如果在header中没找到meta box，扩大搜索范围
+    // If meta box not found in header, expand search range
     if metaOffset == 0 {
-        let searchData = try await readAt(0, 8192)  // 读取前8KB
+        let searchData = try await readAt(0, 8192)  // Read first 8KB
         offset = UInt64(ftypSize)
 
         while offset + 8 < searchData.count {
@@ -99,7 +99,8 @@ public func readHEICThumbnailWithRotation(readAt: @escaping (UInt64, UInt32) asy
             if boxType == "meta" {
                 metaOffset = savedOffset
                 metaSize = boxSize
-                logger.debug("在扩展搜索中找到meta box: offset=\(metaOffset), size=\(metaSize)")
+                logger.debug(
+                    "Found meta box in extended search: offset=\(metaOffset), size=\(metaSize)")
                 break
             }
 
@@ -112,94 +113,97 @@ public func readHEICThumbnailWithRotation(readAt: @escaping (UInt64, UInt32) asy
     }
 
     guard metaOffset > 0 && metaSize > 0 else {
-        logger.error("未找到meta box")
+        logger.error("Meta box not found")
         return nil
     }
 
-    // 第二步：读取meta box内容
+    // Step 2: Read meta box content
     let metaData: Data
     if metaOffset + UInt64(metaSize) <= headerData.count {
         metaData = headerData.subdata(in: Int(metaOffset)..<Int(metaOffset + UInt64(metaSize)))
     } else {
         metaData = try await readAt(metaOffset, metaSize)
-        logger.debug("读取meta box数据: \(metaData.count) 字节")
+        logger.debug("Read meta box data: \(metaData.count) bytes")
     }
 
-    // 第三步：解析meta box，找到缩略图信息
+    // Step 3: Parse meta box, find thumbnail info
     let thumbnailInfos = parseMetaBox(data: metaData)
     guard !thumbnailInfos.isEmpty else {
-        logger.error("无法解析meta box中的缩略图信息")
+        logger.error("Unable to parse thumbnail info from meta box")
         return nil
     }
 
-    // 第四步：读取缩略图数据
-    let thumbnailInfo = thumbnailInfos[0]  // 使用第一个缩略图
+    // Step 4: Read thumbnail data
+    let thumbnailInfo = thumbnailInfos[0]  // Use first thumbnail
     let thumbnailData = try await readAt(UInt64(thumbnailInfo.offset), thumbnailInfo.size)
 
-    logger.debug("读取缩略图数据: \(thumbnailData.count) 字节，旋转角度: \(thumbnailInfo.rotation ?? 0)度")
+    logger.debug(
+        "Read thumbnail data: \(thumbnailData.count) bytes, rotation: \(thumbnailInfo.rotation ?? 0) degrees"
+    )
 
-    // 验证数据是否为有效的图像数据
+    // Verify if data is valid image data
     if thumbnailData.count >= 4 {
         let header = thumbnailData.prefix(4)
         let headerBytes = Array(header)
         logger.debug(
-            "缩略图数据头: \(headerBytes.map { String(format: "%02X", $0) }.joined(separator: " "))")
+            "Thumbnail data header: \(headerBytes.map { String(format: "%02X", $0) }.joined(separator: " "))"
+        )
 
-        // 检查是否为JPEG数据 (FF D8 FF)
+        // Check if it's JPEG data (FF D8 FF)
         if headerBytes[0] == 0xFF && headerBytes[1] == 0xD8 && headerBytes[2] == 0xFF {
-            logger.debug("检测到JPEG缩略图")
+            logger.debug("Detected JPEG thumbnail")
             return (data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0)
         }
 
-        // 检查是否为HEVC数据 (通常以NAL单元开始)
+        // Check if it's HEVC data (usually starts with NAL unit)
         if headerBytes[0] == 0x00 && headerBytes[1] == 0x00 && headerBytes[2] == 0x00
             && headerBytes[3] == 0x01
         {
-            logger.debug("检测到标准HEVC NAL单元")
+            logger.debug("Detected standard HEVC NAL unit")
             if let heicData = try await createHEICFromHEVC(thumbnailData) {
                 return (data: heicData, rotation: thumbnailInfo.rotation ?? 0)
             }
         }
 
-        // 检查HEVC长度前缀格式 (4字节长度 + NAL单元)
+        // Check HEVC length prefix format (4-byte length + NAL unit)
         if headerBytes[0] == 0x00 && headerBytes[1] == 0x00 && headerBytes[2] == 0x00 {
             let nalLength = UInt32(headerBytes[3])
             if nalLength > 0 && nalLength < thumbnailData.count {
-                logger.debug("检测到HEVC长度前缀格式")
+                logger.debug("Detected HEVC length prefix format")
                 if let heicData = try await createHEICFromHEVC(thumbnailData) {
                     return (data: heicData, rotation: thumbnailInfo.rotation ?? 0)
                 }
             }
         }
 
-        // 检查其他HEVC格式
-        if headerBytes[0] == 0x01 {  // 可能是HEVC数据的其他格式
-            logger.debug("检测到HEVC数据，尝试包装为HEIC")
+        // Check other HEVC formats
+        if headerBytes[0] == 0x01 {  // Might be other HEVC format
+            logger.debug("Detected HEVC data, attempting to wrap as HEIC")
             if let heicData = try await createHEICFromHEVC(thumbnailData) {
                 return (data: heicData, rotation: thumbnailInfo.rotation ?? 0)
             }
         }
 
-        // 对于其他格式，尝试直接返回原始数据
-        logger.debug("未识别的数据格式，返回原始数据")
+        // For other formats, try to return raw data
+        logger.debug("Unrecognized data format, returning raw data")
     }
 
     return (data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0)
 }
 
-// MARK: - HEIC解析结构体和函数
+// MARK: - HEIC Structure and Functions
 
 private struct ThumbnailInfo {
     let itemId: UInt32
     let offset: UInt32
     let size: UInt32
-    let rotation: Int?  // 添加旋转角度信息
+    let rotation: Int?  // Add rotation angle information
 }
 
 private struct MdatInfo {
     let offset: UInt64
     let size: UInt32
-    let dataOffset: UInt64  // mdat数据开始的实际偏移
+    let dataOffset: UInt64  // Actual offset where mdat data starts
 }
 
 private struct ItemInfo {
@@ -217,7 +221,7 @@ private struct ItemLocation {
 private struct ItemProperty {
     let propertyIndex: UInt32
     let propertyType: String
-    let rotation: Int?  // 旋转角度（度数）
+    let rotation: Int?  // Rotation angle (in degrees)
 }
 
 private struct ItemPropertyAssociation {
@@ -225,7 +229,7 @@ private struct ItemPropertyAssociation {
     let propertyIndices: [UInt32]
 }
 
-/// 解析box头部
+/// Parse box header
 private func parseBoxHeader(data: Data, offset: inout UInt64) -> (UInt32, String)? {
     guard offset + 8 <= data.count else { return nil }
 
@@ -239,11 +243,11 @@ private func parseBoxHeader(data: Data, offset: inout UInt64) -> (UInt32, String
     return (size, type)
 }
 
-/// 解析meta box
+/// Parse meta box
 private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
-    var offset: UInt64 = 8  // 跳过meta box头部
+    var offset: UInt64 = 8  // Skip meta box header
 
-    // 跳过version和flags
+    // Skip version and flags
     offset += 4
 
     var items: [ItemInfo] = []
@@ -253,17 +257,17 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
     var properties: [ItemProperty] = []
     var propertyAssociations: [ItemPropertyAssociation] = []
 
-    logger.debug("开始解析meta box，数据大小: \(data.count) 字节")
+    logger.debug("Starting meta box parsing, data size: \(data.count) bytes")
 
-    // 解析meta box中的子box
+    // Parse sub-boxes in meta box
     while offset + 8 < data.count {
         let savedOffset = offset
         guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &offset) else {
-            logger.debug("无法解析box头部，停止解析")
+            logger.debug("Unable to parse box header, stopping parsing")
             break
         }
 
-        logger.debug("发现box: 类型=\(boxType), 大小=\(boxSize), 偏移=\(savedOffset)")
+        logger.debug("Found box: type=\(boxType), size=\(boxSize), offset=\(savedOffset)")
 
         let boxData = data.subdata(
             in: Int(savedOffset + 8)..<min(Int(savedOffset + UInt64(boxSize)), data.count))
@@ -272,74 +276,79 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
         case "pitm":  // Primary Item box
             if let itemId = parsePrimaryItem(data: boxData) {
                 primaryItemId = itemId
-                logger.debug("主要项目ID: \(itemId)")
+                logger.debug("Primary item ID: \(itemId)")
             } else {
-                logger.debug("无法解析主要项目ID")
+                logger.debug("Unable to parse primary item ID")
             }
 
         case "iinf":  // Item Info box
             items = parseItemInfo(data: boxData)
-            logger.debug("找到 \(items.count) 个项目")
+            logger.debug("Found \(items.count) items")
             for item in items {
-                logger.debug("  项目: ID=\(item.itemId), 类型=\(item.itemType)")
+                logger.debug("  Item: ID=\(item.itemId), type=\(item.itemType)")
             }
 
         case "iloc":  // Item Location box
             locations = parseItemLocation(data: boxData)
-            logger.debug("找到 \(locations.count) 个位置信息")
+            logger.debug("Found \(locations.count) location entries")
             for location in locations {
                 logger.debug(
-                    "  位置: ID=\(location.itemId), 偏移=\(location.offset), 大小=\(location.length)")
+                    "  Location: ID=\(location.itemId), offset=\(location.offset), size=\(location.length)"
+                )
             }
 
-        case "iref":  // Item Reference box - 关键的缩略图引用信息
+        case "iref":  // Item Reference box - key thumbnail reference info
             thumbnailReferences = parseItemReference(data: boxData)
-            logger.debug("找到 \(thumbnailReferences.count) 个引用关系")
+            logger.debug("Found \(thumbnailReferences.count) references")
             for (from, to) in thumbnailReferences {
-                logger.debug("  引用: \(from) -> \(to)")
+                logger.debug("  Reference: \(from) -> \(to)")
             }
 
         case "iprp":  // Item Properties box
             let (props, assocs) = parseItemProperties(data: boxData)
             properties = props
             propertyAssociations = assocs
-            logger.debug("找到 \(properties.count) 个属性和 \(propertyAssociations.count) 个关联")
+            logger.debug(
+                "Found \(properties.count) properties and \(propertyAssociations.count) associations"
+            )
 
         default:
-            logger.debug("跳过未知box类型: \(boxType)")
+            logger.debug("Skipping unknown box type: \(boxType)")
             break
         }
 
-        // 移动到下一个box
+        // Move to next box
         if boxSize > 8 {
             offset = savedOffset + UInt64(boxSize)
         } else {
-            logger.debug("box大小异常: \(boxSize)，停止解析")
+            logger.debug("Abnormal box size: \(boxSize), stopping parsing")
             break
         }
     }
 
     logger.debug(
-        "解析完成 - 主要项目ID: \(primaryItemId), 项目数: \(items.count), 位置数: \(locations.count), 引用数: \(thumbnailReferences.count)"
+        "Parsing complete - Primary item ID: \(primaryItemId), Items: \(items.count), Locations: \(locations.count), References: \(thumbnailReferences.count)"
     )
 
-    // 根据 iref 信息查找缩略图
-    // 在 iref 中，缩略图的引用类型是 "thmb"，from_item_ID 是缩略图，to_item_ID 是主图像
+    // Find thumbnails based on iref info
+    // In iref, thumbnail reference type is "thmb", from_item_ID is thumbnail, to_item_ID is main image
     var thumbnailCandidates: [ThumbnailInfo] = []
 
     for (thumbnailId, masterIds) in thumbnailReferences {
-        logger.debug("检查引用: 缩略图ID=\(thumbnailId), 主图像IDs=\(masterIds), 主要项目ID=\(primaryItemId)")
+        logger.debug(
+            "Checking reference: Thumbnail ID=\(thumbnailId), Master IDs=\(masterIds), Primary item ID=\(primaryItemId)"
+        )
 
-        // 检查这个缩略图是否引用了主图像
+        // Check if this thumbnail references the main image
         if masterIds.contains(primaryItemId) {
-            logger.debug("找到匹配的缩略图引用: \(thumbnailId) -> \(masterIds)")
+            logger.debug("Found matching thumbnail reference: \(thumbnailId) -> \(masterIds)")
 
-            // 找到对应的项目信息和位置信息
+            // Find corresponding item info and location info
             if let item = items.first(where: { $0.itemId == thumbnailId }),
                 let location = locations.first(where: { $0.itemId == thumbnailId })
             {
 
-                // 查找该项目的旋转属性
+                // Find rotation property for this item
                 var rotation: Int? = nil
                 if let association = propertyAssociations.first(where: { $0.itemId == thumbnailId })
                 {
@@ -361,22 +370,26 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
                     rotation: rotation)
                 thumbnailCandidates.append(thumbnail)
                 logger.debug(
-                    "找到缩略图: itemId=\(thumbnailId), 类型=\(item.itemType), offset=\(location.offset), size=\(location.length), 旋转=\(rotation ?? 0)度"
+                    "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), offset=\(location.offset), size=\(location.length), rotation=\(rotation ?? 0) degrees"
                 )
             } else {
-                logger.debug("无法找到缩略图ID \(thumbnailId) 对应的项目信息或位置信息")
-                logger.debug("  项目信息存在: \(items.first(where: { $0.itemId == thumbnailId }) != nil)")
                 logger.debug(
-                    "  位置信息存在: \(locations.first(where: { $0.itemId == thumbnailId }) != nil)")
+                    "Unable to find item info or location info for thumbnail ID \(thumbnailId)")
+                logger.debug(
+                    "  Item info exists: \(items.first(where: { $0.itemId == thumbnailId }) != nil)"
+                )
+                logger.debug(
+                    "  Location info exists: \(locations.first(where: { $0.itemId == thumbnailId }) != nil)"
+                )
             }
         } else {
-            logger.debug("缩略图 \(thumbnailId) 不引用主图像 \(primaryItemId)")
+            logger.debug("Thumbnail \(thumbnailId) does not reference main image \(primaryItemId)")
         }
     }
 
-    logger.debug("最终找到 \(thumbnailCandidates.count) 个缩略图候选")
+    logger.debug("Found \(thumbnailCandidates.count) thumbnail candidates")
 
-    // 按优先级排序缩略图：JPEG > HEVC
+    // Sort thumbnails by priority: JPEG > HEVC
     thumbnailCandidates.sort { thumbnail1, thumbnail2 in
         let item1 = items.first(where: { $0.itemId == thumbnail1.itemId })
         let item2 = items.first(where: { $0.itemId == thumbnail2.itemId })
@@ -384,33 +397,33 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
         let type1 = item1?.itemType ?? ""
         let type2 = item2?.itemType ?? ""
 
-        // JPEG格式优先
+        // JPEG format priority
         if type1 == "jpeg" && type2 != "jpeg" {
             return true
         } else if type1 != "jpeg" && type2 == "jpeg" {
             return false
         }
 
-        // 其他情况按itemId排序
+        // Other cases sort by itemId
         return thumbnail1.itemId < thumbnail2.itemId
     }
 
     return thumbnailCandidates
 }
 
-/// 解析Primary Item box
+/// Parse Primary Item box
 private func parsePrimaryItem(data: Data) -> UInt32? {
     guard data.count >= 6 else { return nil }
 
-    let offset = 4  // 跳过version和flags
+    let offset = 4  // Skip version and flags
     let itemIdData = data.subdata(in: offset..<offset + 2)
     return itemIdData.withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
 }
 
-/// 解析Item Info box
+/// Parse Item Info box
 private func parseItemInfo(data: Data) -> [ItemInfo] {
     var items: [ItemInfo] = []
-    var offset = 4  // 跳过version和flags
+    var offset = 4  // Skip version and flags
 
     guard offset + 2 < data.count else { return items }
 
@@ -418,19 +431,19 @@ private func parseItemInfo(data: Data) -> [ItemInfo] {
     let entryCount = entryCountData.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
     offset += 2
 
-    logger.debug("Item Info条目数: \(entryCount)")
+    logger.debug("Item Info entry count: \(entryCount)")
 
-    for i in 0..<entryCount {  // 移除50个项目的限制
+    for i in 0..<entryCount {  // Remove 50 item limit
         guard offset + 8 < data.count else {
-            logger.debug("数据不足，已解析 \(i) 个项目，停止解析")
+            logger.debug("Insufficient data, parsed \(i) items, stopping")
             break
         }
 
-        // 解析infe box
+        // Parse infe box
         let savedOffset = offset
         var localOffset = UInt64(offset)
         guard let (infeSize, infeType) = parseBoxHeader(data: data, offset: &localOffset) else {
-            logger.debug("无法解析第 \(i) 个项目的box头部")
+            logger.debug("Unable to parse box header for item \(i)")
             break
         }
 
@@ -439,12 +452,12 @@ private func parseItemInfo(data: Data) -> [ItemInfo] {
                 in: Int(localOffset)..<min(Int(savedOffset + Int(infeSize)), data.count))
             if let item = parseInfeBox(data: infeData) {
                 items.append(item)
-                logger.debug("项目 \(i): ID=\(item.itemId), 类型=\(item.itemType)")
+                logger.debug("Item \(i): ID=\(item.itemId), type=\(item.itemType)")
             } else {
-                logger.debug("无法解析第 \(i) 个项目的infe box")
+                logger.debug("Unable to parse infe box for item \(i)")
             }
         } else {
-            logger.debug("第 \(i) 个项目不是有效的infe box: 类型=\(infeType), 大小=\(infeSize)")
+            logger.debug("Item \(i) is not a valid infe box: type=\(infeType), size=\(infeSize)")
         }
 
         offset = savedOffset + Int(infeSize)
@@ -453,19 +466,19 @@ private func parseItemInfo(data: Data) -> [ItemInfo] {
     return items
 }
 
-/// 解析单个infe box
+/// Parse single infe box
 private func parseInfeBox(data: Data) -> ItemInfo? {
     guard data.count >= 8 else { return nil }
 
-    var offset = 4  // 跳过version和flags
+    var offset = 4  // Skip version and flags
 
     let itemIdData = data.subdata(in: offset..<offset + 2)
     let itemId = itemIdData.withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
     offset += 2
 
-    offset += 2  // 跳过item_protection_index
+    offset += 2  // Skip item_protection_index
 
-    // 读取item_type (4字节)
+    // Read item_type (4 bytes)
     guard offset + 4 <= data.count else { return nil }
     let itemTypeData = data.subdata(in: offset..<offset + 4)
     let itemType = String(data: itemTypeData, encoding: .ascii) ?? ""
@@ -473,17 +486,17 @@ private func parseInfeBox(data: Data) -> ItemInfo? {
     return ItemInfo(itemId: itemId, itemType: itemType, itemName: nil)
 }
 
-/// 解析Item Location box
+/// Parse Item Location box
 private func parseItemLocation(data: Data) -> [ItemLocation] {
     var locations: [ItemLocation] = []
-    var offset = 4  // 跳过version和flags
+    var offset = 4  // Skip version and flags
 
     guard offset + 2 < data.count else { return locations }
 
-    // 检查版本
+    // Check version
     let version = data.count > 0 ? data[0] : 0
 
-    // 解析offset_size, length_size等 (16位值)
+    // Parse offset_size, length_size etc. (16-bit value)
     let values4Data = data.subdata(in: offset..<offset + 2)
     let values4 = values4Data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
 
@@ -494,7 +507,7 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
 
     offset += 2
 
-    // 读取 item count
+    // Read item count
     var itemCount: UInt32 = 0
     if version < 2 {
         guard offset + 2 <= data.count else { return locations }
@@ -509,15 +522,15 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
     }
 
     logger.debug(
-        "Item Location条目数: \(itemCount), offsetSize=\(offsetSize), lengthSize=\(lengthSize), baseOffsetSize=\(baseOffsetSize), indexSize=\(indexSize)"
+        "Item Location entry count: \(itemCount), offsetSize=\(offsetSize), lengthSize=\(lengthSize), baseOffsetSize=\(baseOffsetSize), indexSize=\(indexSize)"
     )
 
-    for i in 0..<itemCount {  // 移除50个项目的限制
-        // 读取 item ID
+    for i in 0..<itemCount {  // Remove 50 item limit
+        // Read item ID
         var itemId: UInt32 = 0
         if version < 2 {
             guard offset + 2 <= data.count else {
-                logger.debug("数据不足，已解析 \(i) 个位置，停止解析")
+                logger.debug("Insufficient data, parsed \(i) locations, stopping")
                 break
             }
             let itemIdData = data.subdata(in: offset..<offset + 2)
@@ -525,7 +538,7 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
             offset += 2
         } else {
             guard offset + 4 <= data.count else {
-                logger.debug("数据不足，已解析 \(i) 个位置，停止解析")
+                logger.debug("Insufficient data, parsed \(i) locations, stopping")
                 break
             }
             let itemIdData = data.subdata(in: offset..<offset + 4)
@@ -533,34 +546,34 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
             offset += 4
         }
 
-        logger.debug("解析项目 \(i): itemId=\(itemId), 当前offset=\(offset)")
+        logger.debug("Parsing item \(i): itemId=\(itemId), current offset=\(offset)")
 
-        // 读取 construction_method (version >= 1)
+        // Read construction_method (version >= 1)
         if version >= 1 {
             guard offset + 2 <= data.count else {
-                logger.debug("数据不足，跳过项目 \(itemId)")
+                logger.debug("Insufficient data, skipping item \(itemId)")
                 break
             }
-            offset += 2  // 跳过 construction_method
+            offset += 2  // Skip construction_method
         }
 
-        // 跳过data_reference_index
+        // Skip data_reference_index
         guard offset + 2 <= data.count else {
-            logger.debug("数据不足，跳过项目 \(itemId)")
+            logger.debug("Insufficient data, skipping item \(itemId)")
             break
         }
         offset += 2
 
-        // 跳过base_offset
+        // Skip base_offset
         guard offset + Int(baseOffsetSize) <= data.count else {
-            logger.debug("数据不足，跳过项目 \(itemId)")
+            logger.debug("Insufficient data, skipping item \(itemId)")
             break
         }
         offset += Int(baseOffsetSize)
 
-        // 读取 extent count
+        // Read extent count
         guard offset + 2 <= data.count else {
-            logger.debug("数据不足，跳过项目 \(itemId)")
+            logger.debug("Insufficient data, skipping item \(itemId)")
             break
         }
 
@@ -568,30 +581,32 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
         let extentCount = extentCountData.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
         offset += 2
 
-        logger.debug("项目 \(itemId) 有 \(extentCount) 个extent")
+        logger.debug("Item \(itemId) has \(extentCount) extents")
 
-        // 检查 extent 数量是否合理
+        // Check if extent count is reasonable
         if extentCount > 100 {
-            logger.warning("警告: 项目 \(itemId) 的 extent 数量异常 (\(extentCount))，可能是解析错误，跳过")
+            logger.warning(
+                "Warning: Item \(itemId) has abnormal extent count (\(extentCount)), might be parsing error, skipping"
+            )
             break
         }
 
-        // 只读取第一个extent的信息（通常缩略图只有一个extent）
+        // Only read first extent info (usually thumbnail has only one extent)
         if extentCount > 0 {
             let extentSize = Int(indexSize) + Int(offsetSize) + Int(lengthSize)
             guard offset + extentSize <= data.count else {
-                logger.debug("数据不足，跳过项目 \(itemId)")
+                logger.debug("Insufficient data, skipping item \(itemId)")
                 break
             }
 
-            // 跳过extent_index
+            // Skip extent_index
             offset += Int(indexSize)
 
-            // 读取extent_offset
+            // Read extent_offset
             var itemOffset: UInt32 = 0
             if offsetSize == 4 {
                 guard offset + 4 <= data.count else {
-                    logger.debug("数据不足，跳过项目 \(itemId)")
+                    logger.debug("Insufficient data, skipping item \(itemId)")
                     break
                 }
                 let offsetData = data.subdata(in: offset..<offset + 4)
@@ -599,7 +614,7 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
                 offset += 4
             } else if offsetSize == 8 {
                 guard offset + 8 <= data.count else {
-                    logger.debug("数据不足，跳过项目 \(itemId)")
+                    logger.debug("Insufficient data, skipping item \(itemId)")
                     break
                 }
                 let offsetData = data.subdata(in: offset..<offset + 8)
@@ -608,11 +623,11 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
                 offset += 8
             }
 
-            // 读取extent_length
+            // Read extent_length
             var itemLength: UInt32 = 0
             if lengthSize == 4 {
                 guard offset + 4 <= data.count else {
-                    logger.debug("数据不足，跳过项目 \(itemId)")
+                    logger.debug("Insufficient data, skipping item \(itemId)")
                     break
                 }
                 let lengthData = data.subdata(in: offset..<offset + 4)
@@ -620,7 +635,7 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
                 offset += 4
             } else if lengthSize == 8 {
                 guard offset + 8 <= data.count else {
-                    logger.debug("数据不足，跳过项目 \(itemId)")
+                    logger.debug("Insufficient data, skipping item \(itemId)")
                     break
                 }
                 let lengthData = data.subdata(in: offset..<offset + 8)
@@ -630,15 +645,16 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
             }
 
             locations.append(ItemLocation(itemId: itemId, offset: itemOffset, length: itemLength))
-            logger.debug("位置信息: itemId=\(itemId), offset=\(itemOffset), length=\(itemLength)")
+            logger.debug(
+                "Location info: itemId=\(itemId), offset=\(itemOffset), length=\(itemLength)")
 
-            // 跳过剩余的extents
+            // Skip remaining extents
             let remainingExtents = Int(extentCount) - 1
             let remainingSize = remainingExtents * extentSize
 
             if remainingSize > 0 {
                 guard offset + remainingSize <= data.count else {
-                    logger.warning("警告: 剩余 extent 数据超出范围，停止解析")
+                    logger.warning("Warning: Remaining extent data out of range, stopping")
                     break
                 }
                 offset += remainingSize
@@ -649,17 +665,17 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
     return locations
 }
 
-/// 解析Item Reference box (iref)
+/// Parse Item Reference box (iref)
 private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
     var references: [(from: UInt32, to: [UInt32])] = []
-    var offset = 4  // 跳过version和flags
+    var offset = 4  // Skip version and flags
 
-    // 检查版本来确定ID字段大小
+    // Check version to determine ID field size
     let version = data.count > 0 ? data[0] : 0
     let idSize = (version == 0) ? 2 : 4
 
     while offset + 8 < data.count {
-        // 解析引用box头部
+        // Parse reference box header
         guard offset + 8 <= data.count else { break }
 
         let refBoxSizeData = data.subdata(in: offset..<offset + 4)
@@ -670,9 +686,9 @@ private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
 
         offset += 8
 
-        // 只处理缩略图引用 (thmb)
+        // Only process thumbnail references (thmb)
         if refBoxType == "thmb" && offset + idSize + 2 <= data.count {
-            // 读取 from_item_ID
+            // Read from_item_ID
             var fromItemId: UInt32 = 0
             if idSize == 2 {
                 let fromIdData = data.subdata(in: offset..<offset + 2)
@@ -684,13 +700,13 @@ private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
             }
             offset += idSize
 
-            // 读取引用数量
+            // Read reference count
             guard offset + 2 <= data.count else { break }
             let refCountData = data.subdata(in: offset..<offset + 2)
             let refCount = refCountData.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
             offset += 2
 
-            // 读取 to_item_IDs
+            // Read to_item_IDs
             var toItemIds: [UInt32] = []
             for _ in 0..<refCount {
                 guard offset + idSize <= data.count else { break }
@@ -709,9 +725,9 @@ private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
             }
 
             references.append((from: fromItemId, to: toItemIds))
-            logger.debug("缩略图引用: \(fromItemId) -> \(toItemIds)")
+            logger.debug("Thumbnail reference: \(fromItemId) -> \(toItemIds)")
         } else {
-            // 跳过其他类型的引用
+            // Skip other reference types
             if refBoxSize > 8 {
                 offset += Int(refBoxSize) - 8
             } else {
@@ -723,13 +739,13 @@ private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
     return references
 }
 
-/// 解析Item Properties box (iprp)
+/// Parse Item Properties box (iprp)
 private func parseItemProperties(data: Data) -> ([ItemProperty], [ItemPropertyAssociation]) {
     var properties: [ItemProperty] = []
     var associations: [ItemPropertyAssociation] = []
     var offset = 0
 
-    // 解析iprp box中的子box
+    // Parse iprp box's sub-boxes
     while offset + 8 < data.count {
         let savedOffset = offset
         var localOffset = UInt64(offset)
@@ -757,11 +773,11 @@ private func parseItemProperties(data: Data) -> ([ItemProperty], [ItemPropertyAs
     return (properties, associations)
 }
 
-/// 解析Item Property Container box (ipco)
+/// Parse Item Property Container box (ipco)
 private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
     var properties: [ItemProperty] = []
     var offset = 0
-    var propertyIndex: UInt32 = 1  // 属性索引从1开始
+    var propertyIndex: UInt32 = 1  // Property index starts from 1
 
     while offset + 8 < data.count {
         let savedOffset = offset
@@ -782,7 +798,8 @@ private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
             propertyIndex: propertyIndex, propertyType: boxType, rotation: rotation)
         properties.append(property)
 
-        logger.debug("属性 \(propertyIndex): 类型=\(boxType), 旋转=\(rotation ?? 0)度")
+        logger.debug(
+            "Property \(propertyIndex): type=\(boxType), rotation=\(rotation ?? 0) degrees")
 
         propertyIndex += 1
         offset = savedOffset + Int(boxSize)
@@ -791,84 +808,85 @@ private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
     return properties
 }
 
-/// 解析irot box
+/// Parse irot box
 private func parseIrotBox(data: Data) -> Int? {
     guard data.count >= 1 else { return nil }
 
     let rotationValue = data[0]
-    // irot box中的值表示逆时针旋转的90度倍数
-    // 0 = 0度, 1 = 90度, 2 = 180度, 3 = 270度
+    // irot box's value represents the number of 90-degree rotations counterclockwise
+    // 0 = 0 degrees, 1 = 90 degrees, 2 = 180 degrees, 3 = 270 degrees
     let rotation = Int(rotationValue & 0x03) * 90
 
-    logger.debug("解析irot: 原始值=\(rotationValue), 旋转角度=\(rotation)度")
+    logger.debug("Parsing irot: raw value=\(rotationValue), rotation angle=\(rotation) degrees")
     return rotation
 }
 
-/// 解析Item Property Association box (ipma)
+/// Parse Item Property Association box (ipma)
 private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociation] {
     var associations: [ItemPropertyAssociation] = []
-    var offset = 4  // 跳过version和flags
+    var offset = 4  // Skip version and flags
 
     guard offset + 4 < data.count else { return associations }
 
-    // 读取entry count (4字节)
+    // Read entry count (4 bytes)
     let entryCountData = data.subdata(in: offset..<offset + 4)
     let entryCount = entryCountData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
     offset += 4
 
-    logger.debug("属性关联条目数: \(entryCount)")
+    logger.debug("Property association entry count: \(entryCount)")
 
-    for i in 0..<entryCount {  // 移除50个项目的限制
+    for i in 0..<entryCount {  // Remove 50 item limit
         guard offset + 2 < data.count else {
-            logger.debug("数据不足，已解析 \(i) 个属性关联，停止解析")
+            logger.debug("Insufficient data, parsed \(i) property associations, stopping")
             break
         }
 
-        // 读取item ID (2字节)
+        // Read item ID (2 bytes)
         let itemIdData = data.subdata(in: offset..<offset + 2)
         let itemId = itemIdData.withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
         offset += 2
 
         guard offset + 1 < data.count else { break }
 
-        // 读取关联数量
+        // Read association count
         let associationCount = data[offset]
         offset += 1
 
-        logger.debug("项目 \(itemId) 有 \(associationCount) 个属性关联")
+        logger.debug("Item \(itemId) has \(associationCount) property associations")
 
         var propertyIndices: [UInt32] = []
 
         for j in 0..<associationCount {
             guard offset + 1 < data.count else { break }
 
-            // 读取属性索引 (1字节，essential标志位在最高位)
+            // Read property index (1 byte, essential flag in highest bit)
             let propertyByte = data[offset]
             let essential = (propertyByte & 0x80) != 0
-            let propertyIndex = UInt32(propertyByte & 0x7F)  // 去掉essential标志位
+            let propertyIndex = UInt32(propertyByte & 0x7F)  // Remove essential flag
             propertyIndices.append(propertyIndex)
             offset += 1
 
-            logger.debug("  关联 \(j): 属性索引=\(propertyIndex), essential=\(essential)")
+            logger.debug(
+                "  Association \(j): property index=\(propertyIndex), essential=\(essential)")
         }
 
         let association = ItemPropertyAssociation(itemId: itemId, propertyIndices: propertyIndices)
         associations.append(association)
 
-        logger.debug("项目 \(itemId) 关联属性: \(propertyIndices)")
+        logger.debug("Item \(itemId) associated properties: \(propertyIndices)")
     }
 
     return associations
 }
 
-/// 查找mdat box
+/// Find mdat box
 private func findMdatBox(
     readAt: @escaping (UInt64, UInt32) async throws -> Data, startOffset: UInt64
 ) async throws -> MdatInfo? {
     var searchOffset = startOffset
     let chunkSize: UInt32 = 4096
 
-    for _ in 0..<20 {  // 最多搜索20个块
+    for _ in 0..<20 {  // Search up to 20 chunks
         let searchData = try await readAt(searchOffset, chunkSize)
         guard searchData.count >= 8 else { break }
 
@@ -882,50 +900,50 @@ private func findMdatBox(
 
             if boxType == "mdat" {
                 let mdatOffset = searchOffset + savedOffset
-                let dataOffset = mdatOffset + 8  // mdat数据从box头后开始
+                let dataOffset = mdatOffset + 8  // mdat data starts after box header
                 return MdatInfo(offset: mdatOffset, size: boxSize, dataOffset: dataOffset)
             }
 
-            // 移动到下一个可能的box位置
+            // Move to next possible box position
             if boxSize > 8 && boxSize < chunkSize {
                 localOffset = savedOffset + UInt64(boxSize)
             } else {
-                localOffset += 4  // 小步前进
+                localOffset += 4  // Small step forward
             }
         }
 
-        searchOffset += UInt64(chunkSize - 8)  // 重叠搜索
+        searchOffset += UInt64(chunkSize - 8)  // Overlapping search
     }
 
     return nil
 }
 
-/// 将HEVC数据包装为完整的HEIC文件
+/// Wrap HEVC data as a complete HEIC file
 private func createHEICFromHEVC(_ hevcData: Data) async throws -> Data? {
-    // 创建一个完整的HEIC容器来包装HEVC数据
+    // Create a complete HEIC container to wrap HEVC data
     var heicData = Data()
 
-    // 1. 创建ftyp box
+    // 1. Create ftyp box
     let ftypBox = createFtypBox()
     heicData.append(ftypBox)
 
-    // 2. 创建meta box (包含完整的元数据结构)
+    // 2. Create meta box (contains complete metadata structure)
     let metaBox = createCompleteMetaBox(hevcDataSize: UInt32(hevcData.count))
     heicData.append(metaBox)
 
-    // 3. 创建mdat box包含HEVC数据
+    // 3. Create mdat box containing HEVC data
     let mdatBox = createMdatBox(with: hevcData)
     heicData.append(mdatBox)
 
-    logger.debug("创建HEIC文件，总大小: \(heicData.count) 字节")
+    logger.debug("Creating HEIC file, total size: \(heicData.count) bytes")
     return heicData
 }
 
-/// 创建ftyp box
+/// Create ftyp box
 private func createFtypBox() -> Data {
     var data = Data()
 
-    // Box size (4 bytes) - 先写0，后面更新
+    // Box size (4 bytes) - Write 0, then update
     let sizeOffset = data.count
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
@@ -942,18 +960,18 @@ private func createFtypBox() -> Data {
     data.append("mif1".data(using: .ascii)!)
     data.append("heic".data(using: .ascii)!)
 
-    // 更新box size
+    // Update box size
     var boxSize = UInt32(data.count).bigEndian
     data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// 创建完整的meta box
+/// Create complete meta box
 private func createCompleteMetaBox(hevcDataSize: UInt32) -> Data {
     var data = Data()
 
-    // Box size (4 bytes) - 先写0，后面更新
+    // Box size (4 bytes) - Write 0, then update
     let sizeOffset = data.count
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
@@ -979,18 +997,18 @@ private func createCompleteMetaBox(hevcDataSize: UInt32) -> Data {
     let ilocBox = createIlocBox(hevcDataSize: hevcDataSize)
     data.append(ilocBox)
 
-    // 5. iprp box - Item Properties (包含 ipco 和 ipma)
+    // 5. iprp box - Item Properties (contains ipco and ipma)
     let iprpBox = createIprpBox()
     data.append(iprpBox)
 
-    // 更新box size
+    // Update box size
     var boxSize = UInt32(data.count).bigEndian
     data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// 创建hdlr box
+/// Create hdlr box
 private func createHdlrBox() -> Data {
     var data = Data()
 
@@ -1019,7 +1037,7 @@ private func createHdlrBox() -> Data {
     return data
 }
 
-/// 创建pitm box
+/// Create pitm box
 private func createPitmBox() -> Data {
     var data = Data()
 
@@ -1040,11 +1058,11 @@ private func createPitmBox() -> Data {
     return data
 }
 
-/// 创建iinf box
+/// Create iinf box
 private func createIinfBox() -> Data {
     var data = Data()
 
-    // Box size - 先写0，后面更新
+    // Box size - Write 0, then update
     let sizeOffset = data.count
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
@@ -1062,14 +1080,14 @@ private func createIinfBox() -> Data {
     let infeBox = createInfeBox()
     data.append(infeBox)
 
-    // 更新box size
+    // Update box size
     var boxSize = UInt32(data.count).bigEndian
     data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// 创建infe box
+/// Create infe box
 private func createInfeBox() -> Data {
     var data = Data()
 
@@ -1100,7 +1118,7 @@ private func createInfeBox() -> Data {
     return data
 }
 
-/// 创建iloc box
+/// Create iloc box
 private func createIlocBox(hevcDataSize: UInt32) -> Data {
     var data = Data()
 
@@ -1132,8 +1150,8 @@ private func createIlocBox(hevcDataSize: UInt32) -> Data {
     var extentCount = UInt16(1).bigEndian
     data.append(Data(bytes: &extentCount, count: 2))
 
-    // Extent offset (指向mdat数据开始位置，需要计算meta box大小)
-    // 这里先写一个占位值，实际应用中需要根据前面box的总大小来计算
+    // Extent offset (points to mdat data start, need to calculate meta box size)
+    // Here write a placeholder value, actual application needs to calculate based on total size of previous boxes
     var extentOffset = UInt32(8).bigEndian  // mdat box header size
     data.append(Data(bytes: &extentOffset, count: 4))
 
@@ -1144,11 +1162,11 @@ private func createIlocBox(hevcDataSize: UInt32) -> Data {
     return data
 }
 
-/// 创建iprp box (Item Properties)
+/// Create iprp box (Item Properties)
 private func createIprpBox() -> Data {
     var data = Data()
 
-    // Box size - 先写0，后面更新
+    // Box size - Write 0, then update
     let sizeOffset = data.count
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
@@ -1163,18 +1181,18 @@ private func createIprpBox() -> Data {
     let ipmaBox = createIpmaBox()
     data.append(ipmaBox)
 
-    // 更新box size
+    // Update box size
     var boxSize = UInt32(data.count).bigEndian
     data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// 创建ipco box
+/// Create ipco box
 private func createIpcoBox() -> Data {
     var data = Data()
 
-    // Box size - 先写0，后面更新
+    // Box size - Write 0, then update
     let sizeOffset = data.count
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
@@ -1185,14 +1203,14 @@ private func createIpcoBox() -> Data {
     let hvcCBox = createHvcCBox()
     data.append(hvcCBox)
 
-    // 更新box size
+    // Update box size
     var boxSize = UInt32(data.count).bigEndian
     data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// 创建hvcC box (简化版本)
+/// Create hvcC box (simplified version)
 private func createHvcCBox() -> Data {
     var data = Data()
 
@@ -1203,7 +1221,7 @@ private func createHvcCBox() -> Data {
     // Box type "hvcC"
     data.append("hvcC".data(using: .ascii)!)
 
-    // HEVC Configuration (简化版本)
+    // HEVC Configuration (simplified version)
     data.append(
         Data([
             0x01,  // configurationVersion
@@ -1224,7 +1242,7 @@ private func createHvcCBox() -> Data {
     return data
 }
 
-/// 创建ipma box
+/// Create ipma box
 private func createIpmaBox() -> Data {
     var data = Data()
 
@@ -1251,7 +1269,7 @@ private func createIpmaBox() -> Data {
     return data
 }
 
-/// 创建mdat box包含HEVC数据
+/// Create mdat box containing HEVC data
 private func createMdatBox(with hevcData: Data) -> Data {
     var data = Data()
 
@@ -1287,7 +1305,7 @@ public func createImageFromThumbnailData(_ thumbnailData: Data, rotation: Int) -
         return nil
     }
 
-    // 如果不需要旋转，直接返回原图
+    // If no rotation needed, return original image
     if rotation == 0 {
         #if canImport(UIKit)
             return UIImage(cgImage: cgImage)
@@ -1297,7 +1315,7 @@ public func createImageFromThumbnailData(_ thumbnailData: Data, rotation: Int) -
         #endif
     }
 
-    // 应用旋转
+    // Apply rotation
     let rotatedCGImage = rotateCGImage(cgImage, by: rotation)
 
     #if canImport(UIKit)
@@ -1317,7 +1335,7 @@ public func createImageFromThumbnailData(_ thumbnailData: Data, rotation: Int) -
 private func rotateCGImage(_ image: CGImage, by degrees: Int) -> CGImage {
     let normalizedDegrees = ((degrees % 360) + 360) % 360
 
-    // 如果不需要旋转，直接返回原图
+    // If no rotation needed, return original image
     if normalizedDegrees == 0 {
         return image
     }
@@ -1325,16 +1343,16 @@ private func rotateCGImage(_ image: CGImage, by degrees: Int) -> CGImage {
     let width = image.width
     let height = image.height
 
-    // 根据旋转角度确定新的尺寸
+    // Determine new dimensions based on rotation angle
     let (newWidth, newHeight): (Int, Int)
     switch normalizedDegrees {
     case 90, 270:
         (newWidth, newHeight) = (height, width)
-    default:  // 180度或其他
+    default:  // 180 degrees or other
         (newWidth, newHeight) = (width, height)
     }
 
-    // 创建位图上下文
+    // Create bitmap context
     guard let colorSpace = image.colorSpace,
         let context = CGContext(
             data: nil,
@@ -1348,15 +1366,15 @@ private func rotateCGImage(_ image: CGImage, by degrees: Int) -> CGImage {
         return image
     }
 
-    // 设置变换矩阵
+    // Set transformation matrix
     context.translateBy(x: CGFloat(newWidth) / 2, y: CGFloat(newHeight) / 2)
     context.rotate(by: CGFloat(normalizedDegrees) * .pi / 180)
     context.translateBy(x: -CGFloat(width) / 2, y: -CGFloat(height) / 2)
 
-    // 绘制图像
+    // Draw image
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-    // 获取旋转后的图像
+    // Get rotated image
     return context.makeImage() ?? image
 }
 
