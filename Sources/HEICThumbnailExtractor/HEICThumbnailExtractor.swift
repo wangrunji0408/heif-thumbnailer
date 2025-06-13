@@ -161,7 +161,8 @@ public func readHEICThumbnail(
         if headerBytes[0] == 0xFF && headerBytes[1] == 0xD8 && headerBytes[2] == 0xFF {
             logger.debug("Detected JPEG thumbnail")
             return Thumbnail(
-                data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0, type: "jpeg",
+                data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0,
+                type: thumbnailInfo.type,
                 width: thumbnailInfo.imageSize?.width ?? 0,
                 height: thumbnailInfo.imageSize?.height ?? 0
             )
@@ -234,8 +235,9 @@ private struct ThumbnailInfo {
     let itemId: UInt32
     let offset: UInt32
     let size: UInt32
-    let rotation: Int?  // Add rotation angle information
-    let imageSize: ImageSize?  // Add image size information
+    let rotation: Int?  // rotation angle
+    let imageSize: ImageSize?  // image size
+    let type: String  // box type
 }
 
 private struct MdatInfo {
@@ -408,7 +410,7 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
 
                 let thumbnail = ThumbnailInfo(
                     itemId: thumbnailId, offset: location.offset, size: location.length,
-                    rotation: rotation, imageSize: imageSize)
+                    rotation: rotation, imageSize: imageSize, type: item.itemType)
                 thumbnailCandidates.append(thumbnail)
                 logger.debug(
                     "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), offset=\(location.offset), size=\(location.length), rotation=\(rotation ?? 0) degrees, imageSize=\(imageSize?.width ?? 0)x\(imageSize?.height ?? 0)"
