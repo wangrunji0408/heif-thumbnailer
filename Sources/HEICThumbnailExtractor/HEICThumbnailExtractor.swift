@@ -127,7 +127,7 @@ public func readHEICThumbnail(
     }
 
     // Step 3: Parse meta box, find thumbnail info
-    let thumbnailInfos = parseMetaBox(data: metaData)
+    let thumbnailInfos = parseMetaBox(data: metaData, metaOffset: metaOffset)
     guard !thumbnailInfos.isEmpty else {
         logger.error("Unable to parse thumbnail info from meta box")
         return nil
@@ -173,7 +173,7 @@ public func readHEICThumbnail(
             && headerBytes[3] == 0x01
         {
             logger.debug("Detected standard HEVC NAL unit")
-            if let heicData = try await createHEICFromHEVC(thumbnailData) {
+            if let heicData = try await createHEICFromHEVC(thumbnailInfo, hevcData: thumbnailData) {
                 return Thumbnail(
                     data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
                     width: thumbnailInfo.imageSize?.width ?? 0,
@@ -187,7 +187,9 @@ public func readHEICThumbnail(
             let nalLength = UInt32(headerBytes[3])
             if nalLength > 0 && nalLength < thumbnailData.count {
                 logger.debug("Detected HEVC length prefix format")
-                if let heicData = try await createHEICFromHEVC(thumbnailData) {
+                if let heicData = try await createHEICFromHEVC(
+                    thumbnailInfo, hevcData: thumbnailData)
+                {
                     return Thumbnail(
                         data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
                         width: thumbnailInfo.imageSize?.width ?? 0,
@@ -200,7 +202,7 @@ public func readHEICThumbnail(
         // Check other HEVC formats
         if headerBytes[0] == 0x01 {  // Might be other HEVC format
             logger.debug("Detected HEVC data, attempting to wrap as HEIC")
-            if let heicData = try await createHEICFromHEVC(thumbnailData) {
+            if let heicData = try await createHEICFromHEVC(thumbnailInfo, hevcData: thumbnailData) {
                 return Thumbnail(
                     data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
                     width: thumbnailInfo.imageSize?.width ?? 0,
@@ -231,6 +233,13 @@ private struct ImageSize {
     }
 }
 
+private struct BoxInfo {
+    let type: String
+    let data: Data
+    let offset: UInt64
+    let size: UInt32
+}
+
 private struct ThumbnailInfo {
     let itemId: UInt32
     let offset: UInt32
@@ -238,6 +247,11 @@ private struct ThumbnailInfo {
     let rotation: Int?  // rotation angle
     let imageSize: ImageSize?  // image size
     let type: String  // box type
+    let propertyIndices: [UInt32]  // Associated property indices
+    let properties: [ItemProperty]  // Associated properties
+    let hvcCBox: Data?  // HEVC configuration box data
+    let colrBox: Data?  // Color information box data
+    let pixiBox: Data?  // Pixel information box data
 }
 
 private struct MdatInfo {
@@ -263,6 +277,7 @@ private struct ItemProperty {
     let propertyType: String
     let rotation: Int?  // Rotation angle (in degrees)
     let imageSize: ImageSize?  // Image size for ispe properties
+    let rawData: Data  // Raw box data for reconstruction
 }
 
 private struct ItemPropertyAssociation {
@@ -285,7 +300,7 @@ private func parseBoxHeader(data: Data, offset: inout UInt64) -> (UInt32, String
 }
 
 /// Parse meta box
-private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
+private func parseMetaBox(data: Data, metaOffset: UInt64 = 0) -> [ThumbnailInfo] {
     var offset: UInt64 = 8  // Skip meta box header
 
     // Skip version and flags
@@ -389,15 +404,23 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
                 let location = locations.first(where: { $0.itemId == thumbnailId })
             {
 
-                // Find rotation property for this item
+                // Find properties for this item
                 var rotation: Int? = nil
                 var imageSize: ImageSize? = nil
+                var associatedProperties: [ItemProperty] = []
+                var associatedIndices: [UInt32] = []
+                var hvcCData: Data? = nil
+                var colrData: Data? = nil
+                var pixiData: Data? = nil
+
                 if let association = propertyAssociations.first(where: { $0.itemId == thumbnailId })
                 {
+                    associatedIndices = association.propertyIndices
                     for propertyIndex in association.propertyIndices {
                         if let property = properties.first(where: {
                             $0.propertyIndex == propertyIndex
                         }) {
+                            associatedProperties.append(property)
                             if property.propertyType == "irot", let rot = property.rotation {
                                 rotation = rot
                             } else if property.propertyType == "ispe", let size = property.imageSize
@@ -410,7 +433,9 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
 
                 let thumbnail = ThumbnailInfo(
                     itemId: thumbnailId, offset: location.offset, size: location.length,
-                    rotation: rotation, imageSize: imageSize, type: item.itemType)
+                    rotation: rotation, imageSize: imageSize, type: item.itemType,
+                    propertyIndices: associatedIndices, properties: associatedProperties,
+                    hvcCBox: hvcCData, colrBox: colrData, pixiBox: pixiData)
                 thumbnailCandidates.append(thumbnail)
                 logger.debug(
                     "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), offset=\(location.offset), size=\(location.length), rotation=\(rotation ?? 0) degrees, imageSize=\(imageSize?.width ?? 0)x\(imageSize?.height ?? 0)"
@@ -831,7 +856,7 @@ private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
 
         let property = ItemProperty(
             propertyIndex: propertyIndex, propertyType: boxType, rotation: rotation,
-            imageSize: imageSize)
+            imageSize: imageSize, rawData: boxData)
         properties.append(property)
 
         logger.debug(
@@ -944,41 +969,45 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
 }
 
 /// Wrap HEVC data as a complete HEIC file
-private func createHEICFromHEVC(_ hevcData: Data) async throws -> Data? {
-    // Create a complete HEIC container to wrap HEVC data
+private func createHEICFromHEVC(_ thumbnail: ThumbnailInfo, hevcData: Data) async throws -> Data? {
     var heicData = Data()
 
     // 1. Create ftyp box
     let ftypBox = createFtypBox()
     heicData.append(ftypBox)
 
-    // 2. Create meta box (contains complete metadata structure)
-    let metaBox = createCompleteMetaBox(hevcDataSize: UInt32(hevcData.count))
+    // 2. Create a meta box to calculate its size
+    var (metaBox, mdatOffset) = createMetaBox(
+        for: thumbnail, hevcDataSize: UInt32(hevcData.count))
+    mdatOffset += UInt32(heicData.count)
     heicData.append(metaBox)
 
-    // 3. Create mdat box containing HEVC data
+    // 3. Update extent location
+    var extentOffset = UInt32(heicData.count + 8).bigEndian
+    heicData.replaceSubrange(
+        Int(mdatOffset)..<Int(mdatOffset + 4), with: Data(bytes: &extentOffset, count: 4))
+
+    // 4. Create mdat box with HEVC data
     let mdatBox = createMdatBox(with: hevcData)
     heicData.append(mdatBox)
 
-    logger.debug("Creating HEIC file, total size: \(heicData.count) bytes")
     return heicData
 }
 
-/// Create ftyp box
+/// Create ftyp box for HEIC file
 private func createFtypBox() -> Data {
     var data = Data()
 
-    // Box size (4 bytes) - Write 0, then update
-    let sizeOffset = data.count
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    // Box size (will be updated)
+    data.append(Data(count: 4))
 
-    // Box type "ftyp" (4 bytes)
+    // Box type
     data.append("ftyp".data(using: .ascii)!)
 
-    // Major brand "heic" (4 bytes)
+    // Major brand
     data.append("heic".data(using: .ascii)!)
 
-    // Minor version (4 bytes)
+    // Minor version
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
     // Compatible brands
@@ -987,50 +1016,68 @@ private func createFtypBox() -> Data {
 
     // Update box size
     var boxSize = UInt32(data.count).bigEndian
-    data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// Create complete meta box
-private func createCompleteMetaBox(hevcDataSize: UInt32) -> Data {
+/// Create mdat box with HEVC data
+private func createMdatBox(with hevcData: Data) -> Data {
     var data = Data()
 
-    // Box size (4 bytes) - Write 0, then update
-    let sizeOffset = data.count
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    // Box size
+    data.append(Data(count: 4))
 
-    // Box type "meta" (4 bytes)
-    data.append("meta".data(using: .ascii)!)
+    // Box type
+    data.append("mdat".data(using: .ascii)!)
 
-    // Version and flags (4 bytes)
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
-
-    // 1. hdlr box - Handler Reference
-    let hdlrBox = createHdlrBox()
-    data.append(hdlrBox)
-
-    // 2. pitm box - Primary Item
-    let pitmBox = createPitmBox()
-    data.append(pitmBox)
-
-    // 3. iinf box - Item Information
-    let iinfBox = createIinfBox()
-    data.append(iinfBox)
-
-    // 4. iloc box - Item Location
-    let ilocBox = createIlocBox(hevcDataSize: hevcDataSize)
-    data.append(ilocBox)
-
-    // 5. iprp box - Item Properties (contains ipco and ipma)
-    let iprpBox = createIprpBox()
-    data.append(iprpBox)
+    // HEVC data
+    data.append(hevcData)
 
     // Update box size
     var boxSize = UInt32(data.count).bigEndian
-    data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
+}
+
+/// Create meta box for thumbnail
+private func createMetaBox(for thumbnail: ThumbnailInfo, hevcDataSize: UInt32)
+    -> (Data, UInt32)  // (box data, offset to mdat offset)
+{
+    var data = Data()
+
+    // Box size (will be updated)
+    data.append(Data(count: 4))
+
+    // Box type
+    data.append("meta".data(using: .ascii)!)
+
+    // Version and flags
+    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+
+    // hdlr box
+    data.append(createHdlrBox())
+
+    // pitm box
+    data.append(createPitmBox(itemId: 1))
+
+    // iinf box
+    data.append(createIinfBox(for: thumbnail))
+
+    // iprp box
+    data.append(createIprpBox(for: thumbnail))
+
+    // iloc box
+    var (ilocBox, mdatOffset) = createIlocBox(itemId: 1, dataSize: hevcDataSize)
+    mdatOffset += UInt32(data.count)
+    data.append(ilocBox)
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
+
+    return (data, mdatOffset)
 }
 
 /// Create hdlr box
@@ -1038,10 +1085,9 @@ private func createHdlrBox() -> Data {
     var data = Data()
 
     // Box size
-    var boxSize = UInt32(33).bigEndian  // 8 + 4 + 4 + 4 + 4 + 8 + 1
-    data.append(Data(bytes: &boxSize, count: 4))
+    data.append(Data(count: 4))
 
-    // Box type "hdlr"
+    // Box type
     data.append("hdlr".data(using: .ascii)!)
 
     // Version and flags
@@ -1050,48 +1096,56 @@ private func createHdlrBox() -> Data {
     // Pre-defined
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
-    // Handler type "pict"
+    // Handler type
     data.append("pict".data(using: .ascii)!)
 
     // Reserved
-    data.append(Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
-    // Name (null-terminated)
+    // Name (empty)
     data.append(Data([0x00]))
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
 /// Create pitm box
-private func createPitmBox() -> Data {
+private func createPitmBox(itemId: UInt32) -> Data {
     var data = Data()
 
     // Box size
-    var boxSize = UInt32(14).bigEndian  // 8 + 4 + 2
-    data.append(Data(bytes: &boxSize, count: 4))
+    data.append(Data(count: 4))
 
-    // Box type "pitm"
+    // Box type
     data.append("pitm".data(using: .ascii)!)
 
     // Version and flags
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
-    // Item ID (2 bytes for version 0)
-    var itemId = UInt16(1).bigEndian
-    data.append(Data(bytes: &itemId, count: 2))
+    // Item ID
+    var itemIdBE = UInt16(itemId).bigEndian
+    data.append(Data(bytes: &itemIdBE, count: 2))
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
 /// Create iinf box
-private func createIinfBox() -> Data {
+private func createIinfBox(for thumbnail: ThumbnailInfo) -> Data {
     var data = Data()
 
-    // Box size - Write 0, then update
-    let sizeOffset = data.count
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    // Box size (will be updated)
+    data.append(Data(count: 4))
 
-    // Box type "iinf"
+    // Box type
     data.append("iinf".data(using: .ascii)!)
 
     // Version and flags
@@ -1102,213 +1156,193 @@ private func createIinfBox() -> Data {
     data.append(Data(bytes: &entryCount, count: 2))
 
     // infe box
-    let infeBox = createInfeBox()
-    data.append(infeBox)
+    data.append(createInfeBox(itemId: 1, itemType: thumbnail.type))
 
     // Update box size
     var boxSize = UInt32(data.count).bigEndian
-    data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
 /// Create infe box
-private func createInfeBox() -> Data {
+private func createInfeBox(itemId: UInt32, itemType: String) -> Data {
     var data = Data()
 
     // Box size
-    var boxSize = UInt32(21).bigEndian  // 8 + 4 + 2 + 2 + 4 + 1
-    data.append(Data(bytes: &boxSize, count: 4))
+    data.append(Data(count: 4))
 
-    // Box type "infe"
+    // Box type
     data.append("infe".data(using: .ascii)!)
 
     // Version and flags
-    data.append(Data([0x02, 0x00, 0x00, 0x00]))  // version 2
+    data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
     // Item ID
-    var itemId = UInt16(1).bigEndian
-    data.append(Data(bytes: &itemId, count: 2))
+    var itemIdBE = UInt16(itemId).bigEndian
+    data.append(Data(bytes: &itemIdBE, count: 2))
 
     // Item protection index
-    var protectionIndex = UInt16(0).bigEndian
-    data.append(Data(bytes: &protectionIndex, count: 2))
-
-    // Item type "hvc1"
-    data.append("hvc1".data(using: .ascii)!)
-
-    // Item name (null-terminated)
-    data.append(Data([0x00]))
-
-    return data
-}
-
-/// Create iloc box
-private func createIlocBox(hevcDataSize: UInt32) -> Data {
-    var data = Data()
-
-    // Box size
-    var boxSize = UInt32(44).bigEndian  // 8 + 4 + 4 + 2 + 2 + 2 + 4 + 2 + 4 + 4 + 8
-    data.append(Data(bytes: &boxSize, count: 4))
-
-    // Box type "iloc"
-    data.append("iloc".data(using: .ascii)!)
-
-    // Version and flags
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
-
-    // Offset size, length size, base offset size, index size
-    data.append(Data([0x44, 0x00, 0x00, 0x00]))  // offset_size=4, length_size=4, base_offset_size=0, index_size=0
-
-    // Item count
-    var itemCount = UInt16(1).bigEndian
-    data.append(Data(bytes: &itemCount, count: 2))
-
-    // Item 1
-    var itemId = UInt16(1).bigEndian
-    data.append(Data(bytes: &itemId, count: 2))
-
-    // Construction method and data reference index
     data.append(Data([0x00, 0x00]))
 
-    // Extent count
-    var extentCount = UInt16(1).bigEndian
-    data.append(Data(bytes: &extentCount, count: 2))
+    // Item type
+    data.append(itemType.padding(toLength: 4, withPad: "\0", startingAt: 0).data(using: .ascii)!)
 
-    // Extent offset (points to mdat data start, need to calculate meta box size)
-    // Here write a placeholder value, actual application needs to calculate based on total size of previous boxes
-    var extentOffset = UInt32(8).bigEndian  // mdat box header size
-    data.append(Data(bytes: &extentOffset, count: 4))
-
-    // Extent length
-    var extentLength = hevcDataSize.bigEndian
-    data.append(Data(bytes: &extentLength, count: 4))
-
-    return data
-}
-
-/// Create iprp box (Item Properties)
-private func createIprpBox() -> Data {
-    var data = Data()
-
-    // Box size - Write 0, then update
-    let sizeOffset = data.count
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
-
-    // Box type "iprp"
-    data.append("iprp".data(using: .ascii)!)
-
-    // ipco box (Item Property Container)
-    let ipcoBox = createIpcoBox()
-    data.append(ipcoBox)
-
-    // ipma box (Item Property Association)
-    let ipmaBox = createIpmaBox()
-    data.append(ipmaBox)
+    // Item name (empty)
+    data.append(Data([0x00]))
 
     // Update box size
     var boxSize = UInt32(data.count).bigEndian
-    data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
+
+    return data
+}
+
+/// Create iprp box
+private func createIprpBox(for thumbnail: ThumbnailInfo) -> Data {
+    var data = Data()
+
+    // Box size (will be updated)
+    data.append(Data(count: 4))
+
+    // Box type
+    data.append("iprp".data(using: .ascii)!)
+
+    // ipco box
+    data.append(createIpcoBox(for: thumbnail))
+
+    // ipma box
+    data.append(createIpmaBox(for: thumbnail))
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
 /// Create ipco box
-private func createIpcoBox() -> Data {
+private func createIpcoBox(for thumbnail: ThumbnailInfo) -> Data {
     var data = Data()
 
-    // Box size - Write 0, then update
-    let sizeOffset = data.count
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    // Box size (will be updated)
+    data.append(Data(count: 4))
 
-    // Box type "ipco"
+    // Box type
     data.append("ipco".data(using: .ascii)!)
 
-    // hvcC box (HEVC Configuration)
-    let hvcCBox = createHvcCBox()
-    data.append(hvcCBox)
+    // Add properties from thumbnail
+    for property in thumbnail.properties {
+        data.append(createPropertyBox(property: property))
+    }
 
     // Update box size
     var boxSize = UInt32(data.count).bigEndian
-    data.replaceSubrange(sizeOffset..<sizeOffset + 4, with: Data(bytes: &boxSize, count: 4))
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// Create hvcC box (simplified version)
-private func createHvcCBox() -> Data {
+/// Create property box from ItemProperty
+private func createPropertyBox(property: ItemProperty) -> Data {
     var data = Data()
 
     // Box size
-    var boxSize = UInt32(31).bigEndian  // 8 + 23 (minimal hvcC)
-    data.append(Data(bytes: &boxSize, count: 4))
+    data.append(Data(count: 4))
 
-    // Box type "hvcC"
-    data.append("hvcC".data(using: .ascii)!)
+    // Box type
+    data.append(property.propertyType.data(using: .ascii)!)
 
-    // HEVC Configuration (simplified version)
-    data.append(
-        Data([
-            0x01,  // configurationVersion
-            0x01,  // general_profile_space, general_tier_flag, general_profile_idc
-            0x60, 0x00, 0x00, 0x00,  // general_profile_compatibility_flags
-            0x90, 0x00, 0x00, 0x00, 0x00, 0x00,  // general_constraint_indicator_flags
-            0x5A,  // general_level_idc
-            0xF0, 0x00,  // min_spatial_segmentation_idc
-            0xFC,  // parallelismType
-            0xFD,  // chromaFormat
-            0xF8,  // bitDepthLumaMinus8
-            0xF8,  // bitDepthChromaMinus8
-            0x00, 0x00,  // avgFrameRate
-            0x0F,  // constantFrameRate, numTemporalLayers, temporalIdNested, lengthSizeMinusOne
-            0x00,  // numOfArrays
-        ]))
+    // Property data
+    data.append(property.rawData)
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
 /// Create ipma box
-private func createIpmaBox() -> Data {
+private func createIpmaBox(for thumbnail: ThumbnailInfo) -> Data {
     var data = Data()
 
     // Box size
-    var boxSize = UInt32(16).bigEndian  // 8 + 4 + 1 + 2 + 1
-    data.append(Data(bytes: &boxSize, count: 4))
+    data.append(Data(count: 4))
 
-    // Box type "ipma"
+    // Box type
     data.append("ipma".data(using: .ascii)!)
 
     // Version and flags
     data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
     // Entry count
-    data.append(Data([0x01]))
+    var entryCount = UInt32(1).bigEndian
+    data.append(Data(bytes: &entryCount, count: 4))
 
     // Item ID
     var itemId = UInt16(1).bigEndian
     data.append(Data(bytes: &itemId, count: 2))
 
-    // Association count and property index
-    data.append(Data([0x01, 0x01]))  // 1 association, property index 1 (hvcC)
+    // Association count
+    data.append(Data([UInt8(thumbnail.propertyIndices.count)]))
+
+    // Property associations
+    for (index, _) in thumbnail.propertyIndices.enumerated() {
+        // Property index (1-based) with essential flag
+        data.append(Data([UInt8(index + 1) | 0x80]))
+    }
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
 
     return data
 }
 
-/// Create mdat box containing HEVC data
-private func createMdatBox(with hevcData: Data) -> Data {
+/// Create iloc box
+private func createIlocBox(itemId: UInt32, dataSize: UInt32) -> (Data, UInt32) {
     var data = Data()
 
-    // Box size (4 bytes)
-    var totalSize = UInt32(8 + hevcData.count).bigEndian
-    data.append(Data(bytes: &totalSize, count: 4))
+    // Box size
+    data.append(Data(count: 4))
 
-    // Box type "mdat" (4 bytes)
-    data.append("mdat".data(using: .ascii)!)
+    // Box type
+    data.append("iloc".data(using: .ascii)!)
 
-    // HEVC data
-    data.append(hevcData)
+    // Version and flags
+    data.append(Data([0x00, 0x00, 0x00, 0x00]))
 
-    return data
+    // Offset size, length size, base offset size, index size
+    data.append(Data([0x44, 0x00]))  // offset_size=4, length_size=4, base_offset_size=0, index_size=0
+
+    // Item count
+    var itemCount = UInt16(1).bigEndian
+    data.append(Data(bytes: &itemCount, count: 2))
+
+    // Item ID
+    var itemIdBE = UInt16(itemId).bigEndian
+    data.append(Data(bytes: &itemIdBE, count: 2))
+
+    // Data reference index
+    data.append(Data([0x00, 0x00]))
+
+    // Extent count
+    data.append(Data([0x00, 0x01]))
+
+    // Extent offset (placeholder)
+    let mdatOffset = UInt32(data.count)
+    data.append(Data(count: 4))
+
+    // Extent length
+    var extentLength = dataSize.bigEndian
+    data.append(Data(bytes: &extentLength, count: 4))
+
+    // Update box size
+    var boxSize = UInt32(data.count).bigEndian
+    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
+
+    return (data, mdatOffset)
 }
 
 /// Create a platform image from HEIC thumbnail data
