@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
     public typealias PlatformImage = NSImage
 #endif
 
-private let logger = Logger(label: "com.hdremote.HEICThumbnailExtractor")
+private let logger = Logger(label: "com.hdremote.HEICThumbnailer")
 
 // MARK: - Public Types
 

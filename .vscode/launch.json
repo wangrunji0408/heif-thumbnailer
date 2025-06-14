@@ -4,19 +4,37 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
+            "cwd": "${workspaceFolder:HEICThumbnailer}",
             "name": "Debug HEICThumbnailCLI",
-            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/debug/HEICThumbnailCLI",
+            "program": "${workspaceFolder:HEICThumbnailer}/.build/debug/HEICThumbnailCLI",
             "preLaunchTask": "swift: Build Debug HEICThumbnailCLI"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
+            "cwd": "${workspaceFolder:HEICThumbnailer}",
             "name": "Release HEICThumbnailCLI",
-            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/release/HEICThumbnailCLI",
+            "program": "${workspaceFolder:HEICThumbnailer}/.build/release/HEICThumbnailCLI",
             "preLaunchTask": "swift: Build Release HEICThumbnailCLI"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
+            "name": "Debug HEICThumbnailerCLI",
+            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/debug/HEICThumbnailerCLI",
+            "preLaunchTask": "swift: Build Debug HEICThumbnailerCLI"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
+            "name": "Release HEICThumbnailerCLI",
+            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/release/HEICThumbnailerCLI",
+            "preLaunchTask": "swift: Build Release HEICThumbnailerCLI"
         }
     ]
 }

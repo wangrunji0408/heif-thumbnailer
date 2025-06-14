@@ -1,6 +1,6 @@
 import ArgumentParser
 import Foundation
-import HEICThumbnailExtractor
+import HEICThumbnailer
 import Logging
 
 private let logger = Logger(label: "com.hdremote.HEICThumbnailCLI")

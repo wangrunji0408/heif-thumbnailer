@@ -1,9 +1,9 @@
 import Foundation
 import XCTest
 
-@testable import HEICThumbnailExtractor
+@testable import HEICThumbnailer
 
-final class HEICThumbnailExtractorTests: XCTestCase {
+final class HEICThumbnailerTests: XCTestCase {
 
     func testExtractThumbnailSonyHLG() async throws {
         let testFileURL = Bundle.module.url(forResource: "SonyHLG", withExtension: "HIF")!

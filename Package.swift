@@ -2,19 +2,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "HEICThumbnailExtractor",
+    name: "HEICThumbnailer",
     platforms: [
-        .macOS(.v13),
-        .iOS(.v16),
+        .macOS(.v11),
+        .iOS(.v12),
     ],
     products: [
         .library(
-            name: "HEICThumbnailExtractor",
-            targets: ["HEICThumbnailExtractor"]
+            name: "HEICThumbnailer",
+            targets: ["HEICThumbnailer"]
         ),
         .executable(
-            name: "HEICThumbnailCLI",
-            targets: ["HEICThumbnailCLI"]
+            name: "HEICThumbnailerCLI",
+            targets: ["HEICThumbnailerCLI"]
         ),
     ],
     dependencies: [
@@ -23,21 +23,21 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "HEICThumbnailExtractor",
+            name: "HEICThumbnailer",
             dependencies: [
                 .product(name: "Logging", package: "swift-log")
             ]
         ),
         .executableTarget(
-            name: "HEICThumbnailCLI",
+            name: "HEICThumbnailerCLI",
             dependencies: [
-                "HEICThumbnailExtractor",
+                "HEICThumbnailer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
         .testTarget(
-            name: "HEICThumbnailExtractorTests",
-            dependencies: ["HEICThumbnailExtractor"],
+            name: "HEICThumbnailerTests",
+            dependencies: ["HEICThumbnailer"],
             resources: [.copy("Resources")]
         ),
     ]
