@@ -13,9 +13,11 @@ final class HEICThumbnailExtractorTests: XCTestCase {
         defer { fileHandle.closeFile() }
 
         // create read function
+        var readCount = 0
         let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
             try fileHandle.seek(toOffset: offset)
             let data = fileHandle.readData(ofLength: Int(length))
+            readCount += 1
             return data
         }
 
@@ -23,6 +25,7 @@ final class HEICThumbnailExtractorTests: XCTestCase {
         for minShortSide in [nil as UInt32?, 100, 200, 500] {
             print("\n--- Testing with minShortSide: \(minShortSide?.description ?? "nil") ---")
 
+            let lastReadCount = readCount
             guard
                 let result = try await readHEICThumbnail(
                     readAt: readAt, minShortSide: minShortSide)
@@ -30,6 +33,9 @@ final class HEICThumbnailExtractorTests: XCTestCase {
                 XCTFail("fail to extract thumbnail")
                 continue
             }
+            let readCountToExtractThumbnail = readCount - lastReadCount
+            XCTAssertEqual(
+                readCountToExtractThumbnail, 2, "should read 2 times to extract thumbnail")
 
             print(
                 "success to extract thumbnail, size: \(result.data.count) bytes, rotation: \(result.rotation) degrees"
