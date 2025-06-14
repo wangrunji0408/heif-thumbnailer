@@ -40,7 +40,7 @@ jobs:
       run: swift test -v
     
     - name: Build CLI tool
-      run: swift build -c release --product HEICThumbnailerCLI
+      run: swift build -c release --product HeifThumbnailerCLI
 
   lint:
     name: SwiftLint
@@ -72,12 +72,12 @@ jobs:
     
     - name: Build release binary
       run: |
-        swift build -c release --product HEICThumbnailerCLI
-        cp .build/release/HEICThumbnailerCLI ./heic-thumbnailer
+        swift build -c release --product HeifThumbnailerCLI
+        cp .build/release/HeifThumbnailerCLI ./heif-thumbnailer
     
     - name: Upload binary artifact
       uses: actions/upload-artifact@v4
       with:
-        name: heic-thumbnailer-macos
-        path: heic-thumbnailer
+        name: heif-thumbnailer-macos
+        path: heif-thumbnailer
         retention-days: 30 

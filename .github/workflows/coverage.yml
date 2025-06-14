@@ -27,7 +27,7 @@ jobs:
     - name: Generate coverage report
       run: |
         xcrun llvm-cov export -format="lcov" \
-          .build/debug/HEICThumbnailerPackageTests.xctest/Contents/MacOS/HEICThumbnailerPackageTests \
+          .build/debug/HeifThumbnailerPackageTests.xctest/Contents/MacOS/HeifThumbnailerPackageTests \
           -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
     
     - name: Upload coverage to Codecov

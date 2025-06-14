@@ -1,6 +1,6 @@
-# HEICThumbnailer
+# HeifThumbnailer
 
-A fast and efficient Swift library for extracting thumbnails from HEIC images with minimal read operations.
+A fast and efficient Swift library for extracting thumbnails from HEIF images.
 
 ## Installation
 
@@ -10,7 +10,7 @@ Add this to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/wangrunji0408/HEICThumbnailer", from: "1.0.0")
+    .package(url: "https://github.com/wangrunji0408/heif-thumbnailer", from: "1.0.0")
 ]
 ```
 
@@ -19,7 +19,7 @@ dependencies: [
 ### Library Usage
 
 ```swift
-import HEICThumbnailer
+import HeifThumbnailer
 
 // Create a read function for your HEIC file
 let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
@@ -28,13 +28,13 @@ let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
 }
 
 // Extract thumbnail with minimum 200px short side
-if let thumbnail = try await readHEICThumbnail(readAt: readAt, minShortSide: 200) {
+if let thumbnail = try await readHeifThumbnail(readAt: readAt, minShortSide: 200) {
     print("Extracted thumbnail: \(thumbnail.width)x\(thumbnail.height)")
     // Use thumbnail.data for the image data
 }
 
 // Or get as platform image (UIImage/NSImage)
-if let image = try await readHEICThumbnailAsImage(readAt: readAt, minShortSide: 200) {
+if let image = try await readHeifThumbnailAsImage(readAt: readAt, minShortSide: 200) {
     // Use the image directly
 }
 ```
@@ -43,10 +43,10 @@ if let image = try await readHEICThumbnailAsImage(readAt: readAt, minShortSide: 
 
 ```bash
 # Extract thumbnail from HEIC file
-swift run HEICThumbnailerCLI input.heic
+swift run HeifThumbnailerCLI input.heic
 
 # Extract with minimum 300px short side
-swift run HEICThumbnailerCLI input.heic -s 300
+swift run HeifThumbnailerCLI input.heic -s 300
 ```
 
 ## Requirements

@@ -1,6 +1,6 @@
 import ArgumentParser
 import Foundation
-import HEICThumbnailer
+import HeifThumbnailer
 import Logging
 
 private let logger = Logger(label: "com.hdremote.HEICThumbnailCLI")
@@ -59,7 +59,7 @@ struct HEICThumbnailCLI: AsyncParsableCommand {
             }
 
             // extract thumbnail data
-            if let thumbnail = try await readHEICThumbnail(
+            if let thumbnail = try await readHeifThumbnail(
                 readAt: readAt, minShortSide: shortSideLength
             ) {
                 logger.info(

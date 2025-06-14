@@ -1,9 +1,9 @@
 import Foundation
 import XCTest
 
-@testable import HEICThumbnailer
+@testable import HeifThumbnailer
 
-final class HEICThumbnailerTests: XCTestCase {
+final class HeifThumbnailerTests: XCTestCase {
 
     func testExtractThumbnailSonyHLG() async throws {
         let testFileURL = Bundle.module.url(forResource: "SonyHLG", withExtension: "HIF")!
@@ -27,7 +27,7 @@ final class HEICThumbnailerTests: XCTestCase {
 
             let lastReadCount = readCount
             guard
-                let result = try await readHEICThumbnail(
+                let result = try await readHeifThumbnail(
                     readAt: readAt, minShortSide: minShortSide)
             else {
                 XCTFail("fail to extract thumbnail")
@@ -77,7 +77,7 @@ final class HEICThumbnailerTests: XCTestCase {
         }
 
         guard
-            let result = try await readHEICThumbnail(readAt: readAt, minShortSide: nil)
+            let result = try await readHeifThumbnail(readAt: readAt, minShortSide: nil)
         else {
             XCTFail("fail to extract thumbnail")
             return

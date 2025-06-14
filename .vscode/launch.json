@@ -4,18 +4,18 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:HEICThumbnailer}",
+            "cwd": "${workspaceFolder:HeifThumbnailer}",
             "name": "Debug HEICThumbnailCLI",
-            "program": "${workspaceFolder:HEICThumbnailer}/.build/debug/HEICThumbnailCLI",
+            "program": "${workspaceFolder:HeifThumbnailer}/.build/debug/HEICThumbnailCLI",
             "preLaunchTask": "swift: Build Debug HEICThumbnailCLI"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:HEICThumbnailer}",
+            "cwd": "${workspaceFolder:HeifThumbnailer}",
             "name": "Release HEICThumbnailCLI",
-            "program": "${workspaceFolder:HEICThumbnailer}/.build/release/HEICThumbnailCLI",
+            "program": "${workspaceFolder:HeifThumbnailer}/.build/release/HEICThumbnailCLI",
             "preLaunchTask": "swift: Build Release HEICThumbnailCLI"
         },
         {
@@ -23,18 +23,18 @@
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
-            "name": "Debug HEICThumbnailerCLI",
-            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/debug/HEICThumbnailerCLI",
-            "preLaunchTask": "swift: Build Debug HEICThumbnailerCLI"
+            "name": "Debug HeifThumbnailerCLI",
+            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/debug/HeifThumbnailerCLI",
+            "preLaunchTask": "swift: Build Debug HeifThumbnailerCLI"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
-            "name": "Release HEICThumbnailerCLI",
-            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/release/HEICThumbnailerCLI",
-            "preLaunchTask": "swift: Build Release HEICThumbnailerCLI"
+            "name": "Release HeifThumbnailerCLI",
+            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/release/HeifThumbnailerCLI",
+            "preLaunchTask": "swift: Build Release HeifThumbnailerCLI"
         }
     ]
 }

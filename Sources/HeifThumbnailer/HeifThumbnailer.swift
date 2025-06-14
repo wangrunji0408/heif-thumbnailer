@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
     public typealias PlatformImage = NSImage
 #endif
 
-private let logger = Logger(label: "com.hdremote.HEICThumbnailer")
+private let logger = Logger(label: "com.hdremote.HeifThumbnailer")
 
 // MARK: - Public Types
 
@@ -77,7 +77,7 @@ private struct ItemPropertyAssociation {
 ///   - readAt: Async function to read data at specific offset and length
 ///   - minShortSide: Minimum short side length in pixels. Returns the smallest thumbnail that meets this requirement. If nil, returns the first available thumbnail.
 /// - Returns: Thumbnail data with metadata, or nil if extraction fails
-public func readHEICThumbnail(
+public func readHeifThumbnail(
     readAt: @escaping (UInt64, UInt32) async throws -> Data,
     minShortSide: UInt32? = nil
 ) async throws -> Thumbnail? {
@@ -108,11 +108,11 @@ public func readHEICThumbnail(
 }
 
 /// Convenience function to extract thumbnail as platform image
-public func readHEICThumbnailAsImage(
+public func readHeifThumbnailAsImage(
     readAt: @escaping (UInt64, UInt32) async throws -> Data,
     minShortSide: UInt32? = nil
 ) async throws -> PlatformImage? {
-    guard let thumbnail = try await readHEICThumbnail(readAt: readAt, minShortSide: minShortSide)
+    guard let thumbnail = try await readHeifThumbnail(readAt: readAt, minShortSide: minShortSide)
     else {
         return nil
     }

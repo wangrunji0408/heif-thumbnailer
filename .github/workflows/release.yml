@@ -21,13 +21,13 @@ jobs:
     
     - name: Build release binary
       run: |
-        swift build -c release --product HEICThumbnailerCLI
-        cp .build/release/HEICThumbnailerCLI ./heic-thumbnailer-macos
-        chmod +x heic-thumbnailer-macos
+        swift build -c release --product HeifThumbnailerCLI
+        cp .build/release/HeifThumbnailerCLI ./heif-thumbnailer-macos
+        chmod +x heif-thumbnailer-macos
     
     - name: Create tarball
       run: |
-        tar -czf heic-thumbnailer-macos.tar.gz heic-thumbnailer-macos
+        tar -czf heif-thumbnailer-macos.tar.gz heif-thumbnailer-macos
     
     - name: Get tag name
       id: tag
@@ -42,6 +42,6 @@ jobs:
         prerelease: false
         generate_release_notes: true
         files: |
-          heic-thumbnailer-macos.tar.gz
+          heif-thumbnailer-macos.tar.gz
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
