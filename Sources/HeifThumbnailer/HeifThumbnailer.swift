@@ -6,9 +6,11 @@ import UniformTypeIdentifiers
 
 #if canImport(UIKit)
     import UIKit
+
     public typealias PlatformImage = UIImage
 #elseif canImport(AppKit)
     import AppKit
+
     public typealias PlatformImage = NSImage
 #endif
 
@@ -132,15 +134,15 @@ private func readMetaBox(readAt: @escaping (UInt64, UInt32) async throws -> Data
 
     // Validate ftyp box
     guard let (ftypSize, ftypType) = parseBoxHeader(data: data, offset: &offset),
-        ftypType == "ftyp"
+          ftypType == "ftyp"
     else {
         logger.error("Invalid HEIC file: missing ftyp box")
         return nil
     }
 
     // Verify HEIC brand
-    if ftypSize >= 12 && offset + 4 <= data.count {
-        let brandData = data.subdata(in: Int(offset)..<Int(offset + 4))
+    if ftypSize >= 12, offset + 4 <= data.count {
+        let brandData = data.subdata(in: Int(offset) ..< Int(offset + 4))
         let brand = String(data: brandData, encoding: .ascii) ?? ""
         guard brand.hasPrefix("hei") else {
             logger.error("Not a HEIC file, brand: \(brand)")
@@ -159,13 +161,13 @@ private func readMetaBox(readAt: @escaping (UInt64, UInt32) async throws -> Data
         if boxType == "meta" {
             logger.debug("Found meta box: offset=\(savedOffset), size=\(boxSize)")
             if savedOffset + UInt64(boxSize) <= data.count {
-                return data.subdata(in: Int(savedOffset)..<Int(savedOffset + UInt64(boxSize)))
+                return data.subdata(in: Int(savedOffset) ..< Int(savedOffset + UInt64(boxSize)))
             } else {
                 return try await readAt(savedOffset, boxSize)
             }
         }
 
-        if boxSize > 8 && savedOffset + UInt64(boxSize) <= data.count {
+        if boxSize > 8, savedOffset + UInt64(boxSize) <= data.count {
             offset = savedOffset + UInt64(boxSize)
         } else {
             break
@@ -178,7 +180,7 @@ private func readMetaBox(readAt: @escaping (UInt64, UInt32) async throws -> Data
 // MARK: - Meta Box Parsing
 
 private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
-    var offset: UInt64 = 12  // Skip meta box header + version/flags
+    var offset: UInt64 = 12 // Skip meta box header + version/flags
 
     var items: [ItemInfo] = []
     var locations: [ItemLocation] = []
@@ -195,7 +197,7 @@ private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
         guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &offset) else { break }
 
         let boxData = data.subdata(
-            in: Int(savedOffset + 8)..<min(Int(savedOffset + UInt64(boxSize)), data.count))
+            in: Int(savedOffset + 8) ..< min(Int(savedOffset + UInt64(boxSize)), data.count))
 
         switch boxType {
         case "pitm":
@@ -248,8 +250,8 @@ private func buildThumbnailInfos(
 
     for (thumbnailId, masterIds) in thumbnailReferences {
         guard masterIds.contains(primaryItemId),
-            let item = items.first(where: { $0.itemId == thumbnailId }),
-            let location = locations.first(where: { $0.itemId == thumbnailId })
+              let item = items.first(where: { $0.itemId == thumbnailId }),
+              let location = locations.first(where: { $0.itemId == thumbnailId })
         else {
             continue
         }
@@ -291,8 +293,8 @@ private func extractItemProperties(
         return (nil, nil, [])
     }
 
-    var rotation: Int? = nil
-    var imageSize: ImageSize? = nil
+    var rotation: Int?
+    var imageSize: ImageSize?
     var associatedProperties: [ItemProperty] = []
 
     for propertyIndex in association.propertyIndices {
@@ -320,10 +322,10 @@ private func extractItemProperties(
 private func parseBoxHeader(data: Data, offset: inout UInt64) -> (UInt32, String)? {
     guard offset + 8 <= data.count else { return nil }
 
-    let size = data.subdata(in: Int(offset)..<Int(offset + 4))
+    let size = data.subdata(in: Int(offset) ..< Int(offset + 4))
         .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
     let type =
-        String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii) ?? ""
+        String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
 
     offset += 8
     return (size, type)
@@ -331,33 +333,33 @@ private func parseBoxHeader(data: Data, offset: inout UInt64) -> (UInt32, String
 
 private func parsePrimaryItem(data: Data) -> UInt32? {
     guard data.count >= 6 else { return nil }
-    return data.subdata(in: 4..<6)
+    return data.subdata(in: 4 ..< 6)
         .withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
 }
 
 private func parseItemInfo(data: Data) -> [ItemInfo] {
     var items: [ItemInfo] = []
-    var offset = 4  // Skip version/flags
+    var offset = 4 // Skip version/flags
 
     guard offset + 2 < data.count else { return items }
 
-    let entryCount = data.subdata(in: offset..<offset + 2)
+    let entryCount = data.subdata(in: offset ..< offset + 2)
         .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
     offset += 2
 
-    for _ in 0..<entryCount {
+    for _ in 0 ..< entryCount {
         guard offset + 8 < data.count else { break }
 
         let savedOffset = offset
         var localOffset = UInt64(offset)
         guard let (infeSize, infeType) = parseBoxHeader(data: data, offset: &localOffset),
-            infeType == "infe", infeSize > 8
+              infeType == "infe", infeSize > 8
         else {
             break
         }
 
         let infeData = data.subdata(
-            in: Int(localOffset)..<min(Int(savedOffset + Int(infeSize)), data.count))
+            in: Int(localOffset) ..< min(Int(savedOffset + Int(infeSize)), data.count))
         if let item = parseInfeBox(data: infeData) {
             items.append(item)
         }
@@ -371,23 +373,23 @@ private func parseItemInfo(data: Data) -> [ItemInfo] {
 private func parseInfeBox(data: Data) -> ItemInfo? {
     guard data.count >= 8 else { return nil }
 
-    let itemId = data.subdata(in: 4..<6)
+    let itemId = data.subdata(in: 4 ..< 6)
         .withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
 
     guard data.count >= 12 else { return nil }
-    let itemType = String(data: data.subdata(in: 8..<12), encoding: .ascii) ?? ""
+    let itemType = String(data: data.subdata(in: 8 ..< 12), encoding: .ascii) ?? ""
 
     return ItemInfo(itemId: itemId, itemType: itemType, itemName: nil)
 }
 
 private func parseItemLocation(data: Data) -> [ItemLocation] {
     var locations: [ItemLocation] = []
-    var offset = 4  // Skip version/flags
+    var offset = 4 // Skip version/flags
 
     guard data.count > 0, offset + 2 < data.count else { return locations }
 
     let version = data[0]
-    let values4 = data.subdata(in: offset..<offset + 2)
+    let values4 = data.subdata(in: offset ..< offset + 2)
         .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
 
     let offsetSize = (values4 >> 12) & 0xF
@@ -402,17 +404,17 @@ private func parseItemLocation(data: Data) -> [ItemLocation] {
     if version < 2 {
         guard offset + 2 <= data.count else { return locations }
         itemCount = UInt32(
-            data.subdata(in: offset..<offset + 2)
+            data.subdata(in: offset ..< offset + 2)
                 .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
         offset += 2
     } else {
         guard offset + 4 <= data.count else { return locations }
-        itemCount = data.subdata(in: offset..<offset + 4)
+        itemCount = data.subdata(in: offset ..< offset + 4)
             .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         offset += 4
     }
 
-    for _ in 0..<itemCount {
+    for _ in 0 ..< itemCount {
         guard
             let location = parseItemLocationEntry(
                 data: data,
@@ -445,12 +447,12 @@ private func parseItemLocationEntry(
     if version < 2 {
         guard offset + 2 <= data.count else { return nil }
         itemId = UInt32(
-            data.subdata(in: offset..<offset + 2)
+            data.subdata(in: offset ..< offset + 2)
                 .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
         offset += 2
     } else {
         guard offset + 4 <= data.count else { return nil }
-        itemId = data.subdata(in: offset..<offset + 4)
+        itemId = data.subdata(in: offset ..< offset + 4)
             .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         offset += 4
     }
@@ -462,7 +464,7 @@ private func parseItemLocationEntry(
 
     // Read extent count
     guard offset + 2 <= data.count else { return nil }
-    let extentCount = data.subdata(in: offset..<offset + 2)
+    let extentCount = data.subdata(in: offset ..< offset + 2)
         .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
     offset += 2
 
@@ -472,16 +474,16 @@ private func parseItemLocationEntry(
     let extentSize = Int(indexSize + offsetSize + lengthSize)
     guard offset + extentSize <= data.count else { return nil }
 
-    offset += Int(indexSize)  // Skip extent_index
+    offset += Int(indexSize) // Skip extent_index
 
     // Read extent_offset
     let itemOffset: UInt32
     if offsetSize == 4 {
-        itemOffset = data.subdata(in: offset..<offset + 4)
+        itemOffset = data.subdata(in: offset ..< offset + 4)
             .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         offset += 4
     } else if offsetSize == 8 {
-        let offset64 = data.subdata(in: offset..<offset + 8)
+        let offset64 = data.subdata(in: offset ..< offset + 8)
             .withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
         itemOffset = UInt32(offset64 & 0xFFFF_FFFF)
         offset += 8
@@ -492,11 +494,11 @@ private func parseItemLocationEntry(
     // Read extent_length
     let itemLength: UInt32
     if lengthSize == 4 {
-        itemLength = data.subdata(in: offset..<offset + 4)
+        itemLength = data.subdata(in: offset ..< offset + 4)
             .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         offset += 4
     } else if lengthSize == 8 {
-        let length64 = data.subdata(in: offset..<offset + 8)
+        let length64 = data.subdata(in: offset ..< offset + 8)
             .withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
         itemLength = UInt32(length64 & 0xFFFF_FFFF)
         offset += 8
@@ -515,7 +517,7 @@ private func parseItemLocationEntry(
 
 private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
     var references: [(from: UInt32, to: [UInt32])] = []
-    var offset = 4  // Skip version/flags
+    var offset = 4 // Skip version/flags
 
     let version = data.count > 0 ? data[0] : 0
     let idSize = (version == 0) ? 2 : 4
@@ -523,15 +525,15 @@ private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
     while offset + 8 < data.count {
         guard offset + 8 <= data.count else { break }
 
-        let refBoxSize = data.subdata(in: offset..<offset + 4)
+        let refBoxSize = data.subdata(in: offset ..< offset + 4)
             .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         let refBoxType =
-            String(data: data.subdata(in: offset + 4..<offset + 8), encoding: .ascii) ?? ""
+            String(data: data.subdata(in: offset + 4 ..< offset + 8), encoding: .ascii) ?? ""
 
         offset += 8
 
         if refBoxType == "thmb",
-            let reference = parseThumbnailReference(data: data, offset: &offset, idSize: idSize)
+           let reference = parseThumbnailReference(data: data, offset: &offset, idSize: idSize)
         {
             references.append(reference)
         } else if refBoxSize > 8 {
@@ -550,34 +552,32 @@ private func parseThumbnailReference(data: Data, offset: inout Int, idSize: Int)
     guard offset + idSize + 2 <= data.count else { return nil }
 
     // Read from_item_ID
-    let fromItemId: UInt32
-    if idSize == 2 {
-        fromItemId = UInt32(
-            data.subdata(in: offset..<offset + 2)
+    let fromItemId: UInt32 = if idSize == 2 {
+        UInt32(
+            data.subdata(in: offset ..< offset + 2)
                 .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
     } else {
-        fromItemId = data.subdata(in: offset..<offset + 4)
+        data.subdata(in: offset ..< offset + 4)
             .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
     }
     offset += idSize
 
     // Read reference count
-    let refCount = data.subdata(in: offset..<offset + 2)
+    let refCount = data.subdata(in: offset ..< offset + 2)
         .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
     offset += 2
 
     // Read to_item_IDs
     var toItemIds: [UInt32] = []
-    for _ in 0..<refCount {
+    for _ in 0 ..< refCount {
         guard offset + idSize <= data.count else { break }
 
-        let toItemId: UInt32
-        if idSize == 2 {
-            toItemId = UInt32(
-                data.subdata(in: offset..<offset + 2)
+        let toItemId: UInt32 = if idSize == 2 {
+            UInt32(
+                data.subdata(in: offset ..< offset + 2)
                     .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
         } else {
-            toItemId = data.subdata(in: offset..<offset + 4)
+            data.subdata(in: offset ..< offset + 4)
                 .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         }
         toItemIds.append(toItemId)
@@ -600,7 +600,7 @@ private func parseItemProperties(data: Data) -> ([ItemProperty], [ItemPropertyAs
         }
 
         let boxData = data.subdata(
-            in: Int(localOffset)..<min(Int(savedOffset + Int(boxSize)), data.count))
+            in: Int(localOffset) ..< min(Int(savedOffset + Int(boxSize)), data.count))
 
         switch boxType {
         case "ipco":
@@ -630,7 +630,7 @@ private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
         }
 
         let boxData = data.subdata(
-            in: Int(localOffset)..<min(Int(savedOffset + Int(boxSize)), data.count))
+            in: Int(localOffset) ..< min(Int(savedOffset + Int(boxSize)), data.count))
 
         let rotation = (boxType == "irot") ? parseIrotBox(data: boxData) : nil
         let imageSize = (boxType == "ispe") ? parseIspeBox(data: boxData) : nil
@@ -659,9 +659,9 @@ private func parseIrotBox(data: Data) -> Int? {
 private func parseIspeBox(data: Data) -> ImageSize? {
     guard data.count >= 12 else { return nil }
 
-    let width = data.subdata(in: 4..<8)
+    let width = data.subdata(in: 4 ..< 8)
         .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    let height = data.subdata(in: 8..<12)
+    let height = data.subdata(in: 8 ..< 12)
         .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
 
     return ImageSize(width: width, height: height)
@@ -669,18 +669,18 @@ private func parseIspeBox(data: Data) -> ImageSize? {
 
 private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociation] {
     var associations: [ItemPropertyAssociation] = []
-    var offset = 4  // Skip version/flags
+    var offset = 4 // Skip version/flags
 
     guard offset + 4 < data.count else { return associations }
 
-    let entryCount = data.subdata(in: offset..<offset + 4)
+    let entryCount = data.subdata(in: offset ..< offset + 4)
         .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
     offset += 4
 
-    for _ in 0..<entryCount {
+    for _ in 0 ..< entryCount {
         guard offset + 3 < data.count else { break }
 
-        let itemId = data.subdata(in: offset..<offset + 2)
+        let itemId = data.subdata(in: offset ..< offset + 2)
             .withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
         offset += 2
 
@@ -688,7 +688,7 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
         offset += 1
 
         var propertyIndices: [UInt32] = []
-        for _ in 0..<associationCount {
+        for _ in 0 ..< associationCount {
             guard offset < data.count else { break }
             let propertyIndex = UInt32(data[offset] & 0x7F)
             propertyIndices.append(propertyIndex)
@@ -707,7 +707,7 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
 private func findSuitableThumbnail(_ thumbnails: [ThumbnailInfo], minShortSide: UInt32?)
     -> ThumbnailInfo?
 {
-    guard let minShortSide = minShortSide else { return thumbnails.first }
+    guard let minShortSide else { return thumbnails.first }
 
     return thumbnails.first { thumbnail in
         guard let imageSize = thumbnail.imageSize else { return true }
@@ -732,7 +732,8 @@ private func createThumbnail(from info: ThumbnailInfo, data: Data) async throws 
             return nil
         }
         return Thumbnail(
-            data: heicData, rotation: rotation, type: "heic", width: width, height: height)
+            data: heicData, rotation: rotation, type: "heic", width: width, height: height
+        )
 
     default:
         logger.error("Unsupported thumbnail type: \(info.type)")
@@ -744,13 +745,13 @@ private func createThumbnail(from info: ThumbnailInfo, data: Data) async throws 
 
 /// Create a platform image from thumbnail data
 public func createImageFromThumbnailData(_ thumbnailData: Data) -> PlatformImage? {
-    return createImageFromThumbnailData(thumbnailData, rotation: 0)
+    createImageFromThumbnailData(thumbnailData, rotation: 0)
 }
 
 /// Create a platform image from thumbnail data with rotation
 public func createImageFromThumbnailData(_ thumbnailData: Data, rotation: Int) -> PlatformImage? {
     guard let imageSource = CGImageSourceCreateWithData(thumbnailData as CFData, nil),
-        let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+          let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
     else {
         return nil
     }
@@ -761,7 +762,8 @@ public func createImageFromThumbnailData(_ thumbnailData: Data, rotation: Int) -
         return UIImage(cgImage: finalImage)
     #elseif canImport(AppKit)
         return NSImage(
-            cgImage: finalImage, size: NSSize(width: finalImage.width, height: finalImage.height))
+            cgImage: finalImage, size: NSSize(width: finalImage.width, height: finalImage.height)
+        )
     #endif
 }
 
@@ -774,11 +776,11 @@ private func rotateCGImage(_ image: CGImage, by degrees: Int) -> CGImage {
         (normalizedDegrees == 90 || normalizedDegrees == 270) ? (height, width) : (width, height)
 
     guard let colorSpace = image.colorSpace,
-        let context = CGContext(
-            data: nil, width: newWidth, height: newHeight,
-            bitsPerComponent: image.bitsPerComponent, bytesPerRow: 0,
-            space: colorSpace, bitmapInfo: image.bitmapInfo.rawValue
-        )
+          let context = CGContext(
+              data: nil, width: newWidth, height: newHeight,
+              bitsPerComponent: image.bitsPerComponent, bytesPerRow: 0,
+              space: colorSpace, bitmapInfo: image.bitmapInfo.rawValue
+          )
     else {
         return image
     }

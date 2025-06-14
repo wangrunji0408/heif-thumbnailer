@@ -15,7 +15,8 @@ class HEICWriter {
         // Update extent location to point to mdat box start
         let mdatOffset = UInt32(buffer.count + 8)
         updateMdatLocation(
-            at: mdatOffsetPosition, offset: mdatOffset, length: UInt32(hevcData.count))
+            at: mdatOffsetPosition, offset: mdatOffset, length: UInt32(hevcData.count)
+        )
 
         writeMdatBox(with: hevcData)
         return buffer
@@ -25,20 +26,20 @@ class HEICWriter {
 
     private func writeFtypBox() {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("ftyp")
-        writeString("heic")  // Major brand
-        writeUInt32(0)  // Minor version
-        writeString("mif1")  // Compatible brands
+        writeString("heic") // Major brand
+        writeUInt32(0) // Minor version
+        writeString("mif1") // Compatible brands
         writeString("heic")
         updateBoxSize(at: startPosition)
     }
 
     private func writeMetaBox(for thumbnail: ThumbnailInfo) -> Int {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("meta")
-        writeUInt32(0)  // Version and flags
+        writeUInt32(0) // Version and flags
 
         writeHdlrBox()
         writePitmBox(itemId: 1)
@@ -52,54 +53,54 @@ class HEICWriter {
 
     private func writeHdlrBox() {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("hdlr")
-        writeUInt32(0)  // Version and flags
-        writeUInt32(0)  // Pre-defined
-        writeString("pict")  // Handler type
-        writeUInt32(0)  // Reserved
+        writeUInt32(0) // Version and flags
+        writeUInt32(0) // Pre-defined
+        writeString("pict") // Handler type
+        writeUInt32(0) // Reserved
         writeUInt32(0)
         writeUInt32(0)
-        writeUInt8(0)  // Name (empty)
+        writeUInt8(0) // Name (empty)
         updateBoxSize(at: startPosition)
     }
 
     private func writePitmBox(itemId: UInt32) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("pitm")
-        writeUInt32(0)  // Version and flags
-        writeUInt16(UInt16(itemId))  // Item ID
+        writeUInt32(0) // Version and flags
+        writeUInt16(UInt16(itemId)) // Item ID
         updateBoxSize(at: startPosition)
     }
 
     private func writeIinfBox(for thumbnail: ThumbnailInfo) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("iinf")
-        writeUInt32(0)  // Version and flags
-        writeUInt16(1)  // Entry count
+        writeUInt32(0) // Version and flags
+        writeUInt16(1) // Entry count
         writeInfeBox(itemId: 1, itemType: thumbnail.type)
         updateBoxSize(at: startPosition)
     }
 
     private func writeInfeBox(itemId: UInt32, itemType: String) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("infe")
-        writeBytes([0x02, 0x00, 0x00, 0x00])  // Version 2, flags 0
-        writeUInt16(UInt16(itemId))  // Item ID
-        writeUInt16(0)  // Item protection index
+        writeBytes([0x02, 0x00, 0x00, 0x00]) // Version 2, flags 0
+        writeUInt16(UInt16(itemId)) // Item ID
+        writeUInt16(0) // Item protection index
 
         assert(itemType.count == 4, "Item type must be 4 bytes")
-        writeString(itemType)  // Item type
-        writeUInt8(0)  // Item name (empty)
+        writeString(itemType) // Item type
+        writeUInt8(0) // Item name (empty)
         updateBoxSize(at: startPosition)
     }
 
     private func writeIprpBox(for thumbnail: ThumbnailInfo) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("iprp")
         writeIpcoBox(for: thumbnail)
         writeIpmaBox(for: thumbnail)
@@ -108,7 +109,7 @@ class HEICWriter {
 
     private func writeIpcoBox(for thumbnail: ThumbnailInfo) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("ipco")
 
         // Add properties from thumbnail
@@ -121,7 +122,7 @@ class HEICWriter {
 
     private func writePropertyBox(property: ItemProperty) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString(property.propertyType)
         writeData(property.rawData)
         updateBoxSize(at: startPosition)
@@ -129,16 +130,16 @@ class HEICWriter {
 
     private func writeIpmaBox(for thumbnail: ThumbnailInfo) {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("ipma")
-        writeUInt32(0)  // Version and flags
-        writeUInt32(1)  // Entry count
-        writeUInt16(1)  // Item ID
-        writeUInt8(UInt8(thumbnail.properties.count))  // Association count
+        writeUInt32(0) // Version and flags
+        writeUInt32(1) // Entry count
+        writeUInt16(1) // Item ID
+        writeUInt8(UInt8(thumbnail.properties.count)) // Association count
 
         // Property associations
         for (index, _) in thumbnail.properties.enumerated() {
-            writeUInt8(UInt8(index + 1) | 0x80)  // Property index with essential flag
+            writeUInt8(UInt8(index + 1) | 0x80) // Property index with essential flag
         }
 
         updateBoxSize(at: startPosition)
@@ -146,15 +147,15 @@ class HEICWriter {
 
     private func writeIlocBox(itemId: UInt32) -> Int {
         let startPosition = buffer.count
-        writeUInt32(0)  // Size placeholder
+        writeUInt32(0) // Size placeholder
         writeString("iloc")
-        writeBytes([0x01, 0x00, 0x00, 0x00])  // Version 1, flags 0
-        writeBytes([0x44, 0x00])  // offset_size=4, length_size=4, base_offset_size=0, index_size=0
-        writeUInt16(1)  // Item count
-        writeUInt16(UInt16(itemId))  // Item ID
-        writeUInt16(0)  // Construction method
-        writeUInt16(0)  // Data reference index
-        writeUInt16(1)  // Extent count
+        writeBytes([0x01, 0x00, 0x00, 0x00]) // Version 1, flags 0
+        writeBytes([0x44, 0x00]) // offset_size=4, length_size=4, base_offset_size=0, index_size=0
+        writeUInt16(1) // Item count
+        writeUInt16(UInt16(itemId)) // Item ID
+        writeUInt16(0) // Construction method
+        writeUInt16(0) // Data reference index
+        writeUInt16(1) // Extent count
 
         // Extent offset and length (placeholder - updated later)
         let mdatOffsetPosition = buffer.count
@@ -166,9 +167,9 @@ class HEICWriter {
     }
 
     private func writeMdatBox(with hevcData: Data) {
-        writeUInt32(UInt32(hevcData.count + 8))  // Box size
-        writeString("mdat")  // Box type
-        writeData(hevcData)  // HEVC data
+        writeUInt32(UInt32(hevcData.count + 8)) // Box size
+        writeString("mdat") // Box type
+        writeData(hevcData) // HEVC data
     }
 
     // MARK: - Helper Methods
@@ -204,16 +205,18 @@ class HEICWriter {
     private func updateBoxSize(at position: Int) {
         let boxSize = UInt32(buffer.count - position)
         var bigEndianSize = boxSize.bigEndian
-        buffer.replaceSubrange(position..<position + 4, with: Data(bytes: &bigEndianSize, count: 4))
+        buffer.replaceSubrange(position ..< position + 4, with: Data(bytes: &bigEndianSize, count: 4))
     }
 
     private func updateMdatLocation(at position: Int, offset: UInt32, length: UInt32) {
         var bigEndianOffset = offset.bigEndian
         buffer.replaceSubrange(
-            position..<position + 4, with: Data(bytes: &bigEndianOffset, count: 4))
+            position ..< position + 4, with: Data(bytes: &bigEndianOffset, count: 4)
+        )
         var bigEndianLength = length.bigEndian
         buffer.replaceSubrange(
-            position + 4..<position + 8, with: Data(bytes: &bigEndianLength, count: 4))
+            position + 4 ..< position + 8, with: Data(bytes: &bigEndianLength, count: 4)
+        )
     }
 }
 

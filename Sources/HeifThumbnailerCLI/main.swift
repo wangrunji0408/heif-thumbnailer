@@ -48,10 +48,11 @@ struct HEICThumbnailCLI: AsyncParsableCommand {
             let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
                 try fileHandle.seek(toOffset: offset)
                 let data = fileHandle.readData(ofLength: Int(length))
-                if data.isEmpty && length > 0 {
+                if data.isEmpty, length > 0 {
                     throw NSError(
                         domain: "HEICError", code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "fail to read file data"])
+                        userInfo: [NSLocalizedDescriptionKey: "fail to read file data"]
+                    )
                 }
                 logger.debug(
                     "read data: offset=\(offset), length=\(length), data=\(data.count) bytes")

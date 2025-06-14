@@ -4,7 +4,6 @@ import XCTest
 @testable import HeifThumbnailer
 
 final class HeifThumbnailerTests: XCTestCase {
-
     func testExtractThumbnailSonyHLG() async throws {
         let testFileURL = Bundle.module.url(forResource: "SonyHLG", withExtension: "HIF")!
 
@@ -28,14 +27,16 @@ final class HeifThumbnailerTests: XCTestCase {
             let lastReadCount = readCount
             guard
                 let result = try await readHeifThumbnail(
-                    readAt: readAt, minShortSide: minShortSide)
+                    readAt: readAt, minShortSide: minShortSide
+                )
             else {
                 XCTFail("fail to extract thumbnail")
                 continue
             }
             let readCountToExtractThumbnail = readCount - lastReadCount
             XCTAssertEqual(
-                readCountToExtractThumbnail, 2, "should read 2 times to extract thumbnail")
+                readCountToExtractThumbnail, 2, "should read 2 times to extract thumbnail"
+            )
 
             print(
                 "success to extract thumbnail, size: \(result.data.count) bytes, rotation: \(result.rotation) degrees"
@@ -53,11 +54,12 @@ final class HeifThumbnailerTests: XCTestCase {
             print("thumbnail size: \(imageSize.width) x \(imageSize.height)")
 
             // verify that the returned thumbnail meets the minShortSide requirement
-            if let minShortSide = minShortSide {
+            if let minShortSide {
                 let shortSide = min(imageSize.width, imageSize.height)
                 XCTAssertGreaterThanOrEqual(
                     shortSide, CGFloat(minShortSide),
-                    "thumbnail short side should be >= \(minShortSide)")
+                    "thumbnail short side should be >= \(minShortSide)"
+                )
             }
         }
     }

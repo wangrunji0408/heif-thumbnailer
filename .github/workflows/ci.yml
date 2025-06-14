@@ -7,6 +7,20 @@ on:
     branches: [ main ]
 
 jobs:
+  check-format:
+    name: Check Format
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install SwiftFormat
+      run: brew install swiftformat
+
+    - name: Check Format
+      run: swiftformat . --lint
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}
@@ -41,19 +55,6 @@ jobs:
     
     - name: Build CLI tool
       run: swift build -c release --product HeifThumbnailerCLI
-
-  lint:
-    name: SwiftLint
-    runs-on: macos-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: SwiftLint
-      uses: norio-nomura/action-swiftlint@3.2.1
-      with:
-        args: --strict
 
   build-release:
     name: Build Release

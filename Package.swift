@@ -25,7 +25,7 @@ let package = Package(
         .target(
             name: "HeifThumbnailer",
             dependencies: [
-                .product(name: "Logging", package: "swift-log")
+                .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .executableTarget(
