@@ -265,10 +265,10 @@ class HEICWriter {
         writeUInt16(1)
 
         // Association count
-        writeUInt8(UInt8(thumbnail.propertyIndices.count))
+        writeUInt8(UInt8(thumbnail.properties.count))
 
         // Property associations
-        for (index, _) in thumbnail.propertyIndices.enumerated() {
+        for (index, _) in thumbnail.properties.enumerated() {
             // Property index (1-based) with essential flag
             writeUInt8(UInt8(index + 1) | 0x80)
         }

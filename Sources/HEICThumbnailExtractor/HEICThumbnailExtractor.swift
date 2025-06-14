@@ -149,77 +149,29 @@ public func readHEICThumbnail(
         "Read thumbnail data: \(thumbnailData.count) bytes, rotation: \(thumbnailInfo.rotation ?? 0) degrees"
     )
 
-    // Verify if data is valid image data
-    if thumbnailData.count >= 4 {
-        let header = thumbnailData.prefix(4)
-        let headerBytes = Array(header)
-        logger.debug(
-            "Thumbnail data header: \(headerBytes.map { String(format: "%02X", $0) }.joined(separator: " "))"
+    if thumbnailInfo.type == "jpeg" {
+        logger.debug("Detected JPEG thumbnail")
+        return Thumbnail(
+            data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0, type: "jpeg",
+            width: thumbnailInfo.imageSize?.width ?? 0,
+            height: thumbnailInfo.imageSize?.height ?? 0
         )
-
-        // Check if it's JPEG data (FF D8 FF)
-        if headerBytes[0] == 0xFF && headerBytes[1] == 0xD8 && headerBytes[2] == 0xFF {
-            logger.debug("Detected JPEG thumbnail")
-            return Thumbnail(
-                data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0,
-                type: thumbnailInfo.type,
-                width: thumbnailInfo.imageSize?.width ?? 0,
-                height: thumbnailInfo.imageSize?.height ?? 0
-            )
+    } else if thumbnailInfo.type == "hvc1" {
+        logger.debug("Detected HEVC thumbnail")
+        guard let heicData = try await createHEICFromHEVC(thumbnailInfo, hevcData: thumbnailData)
+        else {
+            logger.error("Failed to create HEIC from HEVC")
+            return nil
         }
-
-        // Check if it's HEVC data (usually starts with NAL unit)
-        if headerBytes[0] == 0x00 && headerBytes[1] == 0x00 && headerBytes[2] == 0x00
-            && headerBytes[3] == 0x01
-        {
-            logger.debug("Detected standard HEVC NAL unit")
-            if let heicData = try await createHEICFromHEVC(thumbnailInfo, hevcData: thumbnailData) {
-                return Thumbnail(
-                    data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
-                    width: thumbnailInfo.imageSize?.width ?? 0,
-                    height: thumbnailInfo.imageSize?.height ?? 0
-                )
-            }
-        }
-
-        // Check HEVC length prefix format (4-byte length + NAL unit)
-        if headerBytes[0] == 0x00 && headerBytes[1] == 0x00 && headerBytes[2] == 0x00 {
-            let nalLength = UInt32(headerBytes[3])
-            if nalLength > 0 && nalLength < thumbnailData.count {
-                logger.debug("Detected HEVC length prefix format")
-                if let heicData = try await createHEICFromHEVC(
-                    thumbnailInfo, hevcData: thumbnailData)
-                {
-                    return Thumbnail(
-                        data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
-                        width: thumbnailInfo.imageSize?.width ?? 0,
-                        height: thumbnailInfo.imageSize?.height ?? 0
-                    )
-                }
-            }
-        }
-
-        // Check other HEVC formats
-        if headerBytes[0] == 0x01 {  // Might be other HEVC format
-            logger.debug("Detected HEVC data, attempting to wrap as HEIC")
-            if let heicData = try await createHEICFromHEVC(thumbnailInfo, hevcData: thumbnailData) {
-                return Thumbnail(
-                    data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
-                    width: thumbnailInfo.imageSize?.width ?? 0,
-                    height: thumbnailInfo.imageSize?.height ?? 0
-                )
-            }
-        }
-
-        // For other formats, try to return raw data
-        logger.debug("Unrecognized data format, returning raw data")
+        return Thumbnail(
+            data: heicData, rotation: thumbnailInfo.rotation ?? 0, type: "heic",
+            width: thumbnailInfo.imageSize?.width ?? 0,
+            height: thumbnailInfo.imageSize?.height ?? 0
+        )
+    } else {
+        logger.error("Unsupported thumbnail type: \(thumbnailInfo.type)")
+        return nil
     }
-
-    return Thumbnail(
-        data: thumbnailData, rotation: thumbnailInfo.rotation ?? 0, type: "unknown",
-        width: thumbnailInfo.imageSize?.width ?? 0,
-        height: thumbnailInfo.imageSize?.height ?? 0
-    )
 }
 
 // MARK: - HEIC Structure and Functions
@@ -247,11 +199,7 @@ struct ThumbnailInfo {
     let rotation: Int?  // rotation angle
     let imageSize: ImageSize?  // image size
     let type: String  // box type
-    let propertyIndices: [UInt32]  // Associated property indices
     let properties: [ItemProperty]  // Associated properties
-    let hvcCBox: Data?  // HEVC configuration box data
-    let colrBox: Data?  // Color information box data
-    let pixiBox: Data?  // Pixel information box data
 }
 
 private struct MdatInfo {
@@ -408,14 +356,9 @@ private func parseMetaBox(data: Data, metaOffset: UInt64 = 0) -> [ThumbnailInfo]
                 var rotation: Int? = nil
                 var imageSize: ImageSize? = nil
                 var associatedProperties: [ItemProperty] = []
-                var associatedIndices: [UInt32] = []
-                var hvcCData: Data? = nil
-                var colrData: Data? = nil
-                var pixiData: Data? = nil
 
                 if let association = propertyAssociations.first(where: { $0.itemId == thumbnailId })
                 {
-                    associatedIndices = association.propertyIndices
                     for propertyIndex in association.propertyIndices {
                         if let property = properties.first(where: {
                             $0.propertyIndex == propertyIndex
@@ -434,8 +377,7 @@ private func parseMetaBox(data: Data, metaOffset: UInt64 = 0) -> [ThumbnailInfo]
                 let thumbnail = ThumbnailInfo(
                     itemId: thumbnailId, offset: location.offset, size: location.length,
                     rotation: rotation, imageSize: imageSize, type: item.itemType,
-                    propertyIndices: associatedIndices, properties: associatedProperties,
-                    hvcCBox: hvcCData, colrBox: colrData, pixiBox: pixiData)
+                    properties: associatedProperties)
                 thumbnailCandidates.append(thumbnail)
                 logger.debug(
                     "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), offset=\(location.offset), size=\(location.length), rotation=\(rotation ?? 0) degrees, imageSize=\(imageSize?.width ?? 0)x\(imageSize?.height ?? 0)"
