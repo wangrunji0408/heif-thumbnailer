@@ -982,14 +982,16 @@ private func createHEICFromHEVC(_ thumbnail: ThumbnailInfo, hevcData: Data) asyn
     mdatOffset += UInt32(heicData.count)
     heicData.append(metaBox)
 
-    // 3. Update extent location
+    // 3. Update extent location to point to mdat box start
     var extentOffset = UInt32(heicData.count + 8).bigEndian
     heicData.replaceSubrange(
         Int(mdatOffset)..<Int(mdatOffset + 4), with: Data(bytes: &extentOffset, count: 4))
 
     // 4. Create mdat box with HEVC data
-    let mdatBox = createMdatBox(with: hevcData)
-    heicData.append(mdatBox)
+    var mdatBoxSize = UInt32(hevcData.count + 8).bigEndian
+    heicData.append(Data(bytes: &mdatBoxSize, count: 4))
+    heicData.append("mdat".data(using: .ascii)!)
+    heicData.append(hevcData)
 
     return heicData
 }
@@ -1013,26 +1015,6 @@ private func createFtypBox() -> Data {
     // Compatible brands
     data.append("mif1".data(using: .ascii)!)
     data.append("heic".data(using: .ascii)!)
-
-    // Update box size
-    var boxSize = UInt32(data.count).bigEndian
-    data.replaceSubrange(0..<4, with: Data(bytes: &boxSize, count: 4))
-
-    return data
-}
-
-/// Create mdat box with HEVC data
-private func createMdatBox(with hevcData: Data) -> Data {
-    var data = Data()
-
-    // Box size
-    data.append(Data(count: 4))
-
-    // Box type
-    data.append("mdat".data(using: .ascii)!)
-
-    // HEVC data
-    data.append(hevcData)
 
     // Update box size
     var boxSize = UInt32(data.count).bigEndian
@@ -1175,8 +1157,8 @@ private func createInfeBox(itemId: UInt32, itemType: String) -> Data {
     // Box type
     data.append("infe".data(using: .ascii)!)
 
-    // Version and flags
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    // Version and flags (version 2, flags 0x000000 for main image)
+    data.append(Data([0x02, 0x00, 0x00, 0x00]))
 
     // Item ID
     var itemIdBE = UInt16(itemId).bigEndian
@@ -1310,8 +1292,8 @@ private func createIlocBox(itemId: UInt32, dataSize: UInt32) -> (Data, UInt32) {
     // Box type
     data.append("iloc".data(using: .ascii)!)
 
-    // Version and flags
-    data.append(Data([0x00, 0x00, 0x00, 0x00]))
+    // Version and flags (version 1 to support construction_method)
+    data.append(Data([0x01, 0x00, 0x00, 0x00]))
 
     // Offset size, length size, base offset size, index size
     data.append(Data([0x44, 0x00]))  // offset_size=4, length_size=4, base_offset_size=0, index_size=0
@@ -1320,9 +1302,12 @@ private func createIlocBox(itemId: UInt32, dataSize: UInt32) -> (Data, UInt32) {
     var itemCount = UInt16(1).bigEndian
     data.append(Data(bytes: &itemCount, count: 2))
 
-    // Item ID
+    // Item ID (16-bit for version 1)
     var itemIdBE = UInt16(itemId).bigEndian
     data.append(Data(bytes: &itemIdBE, count: 2))
+
+    // Construction method (version >= 1)
+    data.append(Data([0x00, 0x00]))
 
     // Data reference index
     data.append(Data([0x00, 0x00]))
