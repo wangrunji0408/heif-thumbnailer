@@ -2,7 +2,7 @@ import Foundation
 @testable import HeifThumbnailer
 import XCTest
 
-final class SonyArwThumbnailerTests: XCTestCase {
+final class SonyTests: XCTestCase {
     func testSonyArwThumbnailExtraction() async throws {
         // Get the test ARW file
         let testBundle = Bundle.module

@@ -3,7 +3,7 @@ import XCTest
 
 @testable import HeifThumbnailer
 
-final class HeifThumbnailerTests: XCTestCase {
+final class HeifTests: XCTestCase {
     func testExtractThumbnailSonyHLG() async throws {
         let testFileURL = Bundle.module.url(forResource: "SonyHLG", withExtension: "HIF")!
 

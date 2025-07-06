@@ -1,7 +1,7 @@
 @testable import HeifThumbnailer
 import XCTest
 
-final class JpegThumbnailerTests: XCTestCase {
+final class JpegTests: XCTestCase {
     func testJpegFileTypeDetection() throws {
         // Test file type detection logic
         let jpegExtensions = ["jpg", "jpeg", "JPG", "JPEG"]
