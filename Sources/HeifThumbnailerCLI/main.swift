@@ -94,6 +94,20 @@ struct HEICThumbnailCLI: AsyncParsableCommand {
                 } else {
                     logger.error("fail to extract JPEG thumbnail from file")
                 }
+            } else if fileExtension == "arw" {
+                // Extract Sony ARW thumbnail
+                if let thumbnail = try await readSonyArwThumbnail(
+                    readAt: readAt, minShortSide: shortSideLength
+                ) {
+                    logger.info("success to extract Sony ARW thumbnail, size: \(thumbnail.data.count) bytes, type: \(thumbnail.type), image size: \(thumbnail.width)x\(thumbnail.height)")
+
+                    // save thumbnail data
+                    let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.jpg")
+                    try thumbnail.data.write(to: outputURL)
+                    logger.info("thumbnail saved to: \(outputURL.path)")
+                } else {
+                    logger.error("fail to extract Sony ARW thumbnail from file")
+                }
             } else {
                 logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, and JPEG are supported.")
             }
