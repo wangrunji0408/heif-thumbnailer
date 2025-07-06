@@ -30,6 +30,16 @@ private struct ThumbnailEntry {
     let height: UInt32?
 }
 
+private struct MPImageEntry {
+    let flags: UInt32 // bits 31-27: image flags
+    let format: UInt32 // bits 26-24: image format (0=JPEG)
+    let type: UInt32 // bits 23-0: image type
+    let length: UInt32 // image size in bytes
+    let start: UInt32 // image offset
+    let dependent1: UInt16 // dependent image 1 entry number
+    let dependent2: UInt16 // dependent image 2 entry number
+}
+
 private struct ExifHeader {
     let byteOrder: ByteOrder
     let ifdOffset: UInt32
@@ -358,10 +368,12 @@ private func parseMPFData(_ mpfData: Data, mpfOffset: UInt32) -> [ThumbnailEntry
             logger.debug("Number of Images: \(numberOfImages)")
         case 0xB002: // MP Entry
             if type == 7, count > 0 { // UNDEFINED type with count > 0
-                // MP Entry data is stored at valueOffset if count <= 4, otherwise at the offset pointed by valueOffset
+                // MP Entry data location depends on the count
                 if count <= 4 {
-                    mpEntryOffset = valueOffset
+                    // Data is stored directly in the valueOffset field
+                    mpEntryOffset = UInt32(currentOffset + 8) // Point to the valueOffset field itself
                 } else {
+                    // Data is stored at the offset pointed by valueOffset
                     // The offset is relative to the start of the TIFF header
                     mpEntryOffset = valueOffset + UInt32(tiffHeaderStart)
                 }
@@ -388,8 +400,8 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
 
     logger.debug("Parsing \(numberOfImages) MP entries at offset \(entryOffset)")
 
-    // First pass: collect all entries to calculate proper offsets
-    var entries: [(attributes: UInt32, size: UInt32, offset: UInt32)] = []
+    // Parse all MP entries first
+    var mpEntries: [MPImageEntry] = []
     var tempOffset = entryOffset
 
     for i in 0 ..< numberOfImages {
@@ -398,69 +410,125 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
         let imageAttributes = readUInt32(data, offset: tempOffset, byteOrder: byteOrder)
         let imageSize = readUInt32(data, offset: tempOffset + 4, byteOrder: byteOrder)
         let imageOffset = readUInt32(data, offset: tempOffset + 8, byteOrder: byteOrder)
+        let dependent1 = readUInt16(data, offset: tempOffset + 12, byteOrder: byteOrder)
+        let dependent2 = readUInt16(data, offset: tempOffset + 14, byteOrder: byteOrder)
 
-        logger.debug("MP Entry \(i): attributes=0x\(String(imageAttributes, radix: 16)), size=\(imageSize), offset=\(imageOffset)")
+        // Extract flags, format, and type from imageAttributes
+        let flags = (imageAttributes & 0xF800_0000) >> 27
+        let format = (imageAttributes & 0x0700_0000) >> 24
+        let type = imageAttributes & 0x00FF_FFFF
 
-        entries.append((attributes: imageAttributes, size: imageSize, offset: imageOffset))
+        logger.debug("MP Entry \(i): flags=0x\(String(flags, radix: 16)), format=\(format), type=0x\(String(type, radix: 16)), size=\(imageSize), offset=\(imageOffset)")
+
+        let entry = MPImageEntry(
+            flags: flags,
+            format: format,
+            type: type,
+            length: imageSize,
+            start: imageOffset,
+            dependent1: dependent1,
+            dependent2: dependent2
+        )
+        mpEntries.append(entry)
         tempOffset += 16
     }
 
-    // Second pass: calculate absolute offsets and create thumbnail entries
-    for (i, entry) in entries.enumerated() {
-        // Check if this is a valid image entry
-        if entry.size > 0, entry.size < 50_000_000 { // Reasonable size check
-            let imageType = (entry.attributes & 0x7000000) >> 24
+    // Process entries to create thumbnails
+    for (i, entry) in mpEntries.enumerated() {
+        // Skip invalid entries
+        guard entry.length > 0, entry.length < 50_000_000 else { continue }
 
-            // Determine image type
-            let entryType: String
-            if i == 0 {
-                entryType = "primary" // First image is usually the primary image
-            } else if imageType == 0 {
-                entryType = "thumbnail" // Type 0 is typically thumbnail
+        // Determine image type based on MPImageType
+        let entryType: String
+        let isPreview: Bool
+
+        switch entry.type {
+        case 0x010001: // Large Thumbnail (VGA equivalent)
+            entryType = "thumbnail"
+            isPreview = true
+        case 0x010002: // Large Thumbnail (full HD equivalent)
+            entryType = "thumbnail"
+            isPreview = true
+        case 0x010003: // Large Thumbnail (4K equivalent)
+            entryType = "thumbnail"
+            isPreview = true
+        case 0x010004: // Large Thumbnail (8K equivalent)
+            entryType = "thumbnail"
+            isPreview = true
+        case 0x010005: // Large Thumbnail (16K equivalent)
+            entryType = "thumbnail"
+            isPreview = true
+        case 0x020001: // Multi-frame Panorama
+            entryType = "preview"
+            isPreview = true
+        case 0x020002: // Multi-frame Disparity
+            entryType = "preview"
+            isPreview = true
+        case 0x020003: // Multi-angle
+            entryType = "preview"
+            isPreview = true
+        case 0x030000: // Baseline MP Primary Image
+            entryType = "primary"
+            isPreview = false
+        case 0x040000: // Original Preservation Image
+            entryType = "preview"
+            isPreview = true
+        case 0x050000: // Gain Map Image
+            entryType = "preview"
+            isPreview = true
+        default:
+            // Check if it's a large thumbnail type (0x01xxxx)
+            if (entry.type & 0xFF0000) == 0x010000 {
+                entryType = "thumbnail"
+                isPreview = true
             } else {
-                entryType = "preview" // Other types are previews
-            }
-
-            // Calculate absolute offset
-            let absoluteOffset: UInt32
-            if entry.offset == 0 {
-                // Offset 0 means this is the primary image at the start of the file
-                absoluteOffset = 0
-            } else {
-                // For MPF format, the offset field can be interpreted differently:
-                // If it's a reasonable absolute offset, use it directly
-                // Otherwise, calculate based on the first image size
-                if i > 0, !entries.isEmpty {
-                    let firstImageSize = entries[0].size
-                    let expectedOffset = firstImageSize + 2 // Add 2 bytes for alignment
-
-                    // If the entry offset is much larger than expected, it's likely absolute
-                    if entry.offset > firstImageSize * 2 {
-                        absoluteOffset = entry.offset
-                    } else {
-                        // Use the calculated offset based on first image size
-                        absoluteOffset = expectedOffset
-                    }
-
-                    logger.debug("MPF offset calculation: entry.offset=\(entry.offset), firstImageSize=\(firstImageSize), expectedOffset=\(expectedOffset), chosen=\(absoluteOffset)")
-                } else {
-                    absoluteOffset = entry.offset
-                }
-            }
-
-            // Skip the primary image (offset 0) as it's not a thumbnail
-            if absoluteOffset > 0 {
-                let thumbnailEntry = ThumbnailEntry(
-                    offset: absoluteOffset,
-                    length: entry.size,
-                    type: entryType,
-                    width: nil, // MPF doesn't provide dimensions in header
-                    height: nil
-                )
-                thumbnails.append(thumbnailEntry)
-                logger.debug("Found MPF \(entryType): calculated offset=\(absoluteOffset), size=\(entry.size)")
+                entryType = "preview"
+                isPreview = true
             }
         }
+
+        // Only extract preview/thumbnail images, skip primary image
+        guard isPreview else { continue }
+
+        // Calculate absolute offset
+        let absoluteOffset: UInt32
+        if entry.start == 0 {
+            // Offset 0 means this is the primary image at the start of the file
+            // For thumbnails, this shouldn't happen, but handle it gracefully
+            continue
+        } else {
+            // MPF offsets can be interpreted in different ways:
+            // 1. Absolute offset from start of file (most common)
+            // 2. Relative to end of primary image
+            // 3. Some cameras use different reference points
+
+            // Validate the offset makes sense
+            // If it's too small, it might be relative to something else
+            if entry.start < 1024, i > 0 {
+                // This looks like a relative offset, try to calculate absolute
+                // In some MPF implementations, offsets are relative to the end of the first image
+                if let firstEntry = mpEntries.first {
+                    let calculatedOffset = firstEntry.start + firstEntry.length
+                    logger.debug("MPF offset seems relative, trying calculated offset: \(calculatedOffset)")
+                    absoluteOffset = calculatedOffset
+                } else {
+                    absoluteOffset = entry.start
+                }
+            } else {
+                // Use as absolute offset
+                absoluteOffset = entry.start
+            }
+        }
+
+        let thumbnailEntry = ThumbnailEntry(
+            offset: absoluteOffset,
+            length: entry.length,
+            type: entryType,
+            width: nil, // MPF doesn't provide dimensions in header
+            height: nil
+        )
+        thumbnails.append(thumbnailEntry)
+        logger.debug("Found MPF \(entryType): offset=\(absoluteOffset), size=\(entry.length), type=0x\(String(entry.type, radix: 16))")
     }
 
     return thumbnails
