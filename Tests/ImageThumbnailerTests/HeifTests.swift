@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import HeifThumbnailer
+@testable import ImageThumbnailer
 
 final class HeifTests: XCTestCase {
     func testExtractThumbnailSonyHLG() async throws {

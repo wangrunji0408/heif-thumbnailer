@@ -1,4 +1,4 @@
-@testable import HeifThumbnailer
+@testable import ImageThumbnailer
 import XCTest
 
 final class JpegTests: XCTestCase {

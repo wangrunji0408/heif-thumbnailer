@@ -2,19 +2,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "HeifThumbnailer",
+    name: "ImageThumbnailer",
     platforms: [
         .macOS(.v11),
         .iOS(.v12),
     ],
     products: [
         .library(
-            name: "HeifThumbnailer",
-            targets: ["HeifThumbnailer"]
+            name: "ImageThumbnailer",
+            targets: ["ImageThumbnailer"]
         ),
         .executable(
-            name: "HeifThumbnailerCLI",
-            targets: ["HeifThumbnailerCLI"]
+            name: "ImageThumbnailerCLI",
+            targets: ["ImageThumbnailerCLI"]
         ),
     ],
     dependencies: [
@@ -23,21 +23,21 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "HeifThumbnailer",
+            name: "ImageThumbnailer",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .executableTarget(
-            name: "HeifThumbnailerCLI",
+            name: "ImageThumbnailerCLI",
             dependencies: [
-                "HeifThumbnailer",
+                "ImageThumbnailer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
         .testTarget(
-            name: "HeifThumbnailerTests",
-            dependencies: ["HeifThumbnailer"],
+            name: "ImageThumbnailerTests",
+            dependencies: ["ImageThumbnailer"],
             resources: [.copy("Resources")]
         ),
     ]

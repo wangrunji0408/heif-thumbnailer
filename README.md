@@ -1,6 +1,6 @@
-# HeifThumbnailer
+# ImageThumbnailer
 
-A fast and efficient Swift library for extracting thumbnails from HEIF images.
+A fast and efficient Swift library for extracting thumbnails from various image formats including HEIF, JPEG, and Sony ARW files.
 
 ## Installation
 
@@ -10,7 +10,7 @@ Add this to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/wangrunji0408/heif-thumbnailer", from: "1.0.0")
+    .package(url: "https://github.com/wangrunji0408/image-thumbnailer", from: "1.0.0")
 ]
 ```
 
@@ -19,18 +19,29 @@ dependencies: [
 ### Library Usage
 
 ```swift
-import HeifThumbnailer
+import ImageThumbnailer
 
-// Create a read function for your HEIC file
+// Create a read function for your image file
 let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
     // Your file reading implementation
     return fileData.subdata(in: Int(offset)..<Int(offset + length))
 }
 
 // Extract thumbnail with minimum 200px short side
+// For HEIF/HEIC files
 if let thumbnail = try await readHeifThumbnail(readAt: readAt, minShortSide: 200) {
     print("Extracted thumbnail: \(thumbnail.width)x\(thumbnail.height)")
     // Use thumbnail.data for the image data
+}
+
+// For JPEG files
+if let thumbnail = try await readJpegThumbnail(readAt: readAt, minShortSide: 200) {
+    print("Extracted JPEG thumbnail: \(thumbnail.width)x\(thumbnail.height)")
+}
+
+// For Sony ARW files
+if let thumbnail = try await readSonyArwThumbnail(readAt: readAt, minShortSide: 200) {
+    print("Extracted Sony ARW thumbnail: \(thumbnail.width)x\(thumbnail.height)")
 }
 
 // Or get as platform image (UIImage/NSImage)
@@ -42,12 +53,21 @@ if let image = try await readHeifThumbnailAsImage(readAt: readAt, minShortSide: 
 ### Command Line Usage
 
 ```bash
-# Extract thumbnail from HEIC file
-swift run HeifThumbnailerCLI input.heic
+# Extract thumbnail from various image formats
+swift run ImageThumbnailerCLI input.heic
+swift run ImageThumbnailerCLI input.jpg
+swift run ImageThumbnailerCLI input.arw
 
 # Extract with minimum 300px short side
-swift run HeifThumbnailerCLI input.heic -s 300
+swift run ImageThumbnailerCLI input.heic -s 300
 ```
+
+## Supported Formats
+
+- HEIF/HEIC files
+- JPEG files
+- Sony ARW files
+- More formats coming soon
 
 ## Requirements
 

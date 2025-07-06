@@ -1,18 +1,18 @@
 import ArgumentParser
 import Foundation
-import HeifThumbnailer
+import ImageThumbnailer
 import Logging
 
-private let logger = Logger(label: "com.hdremote.HEICThumbnailCLI")
+private let logger = Logger(label: "com.hdremote.ImageThumbnailCLI")
 
 @main
-struct HEICThumbnailCLI: AsyncParsableCommand {
+struct ImageThumbnailCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "HEICThumbnailCLI",
-        abstract: "A tool to generate thumbnails from HEIC and JPEG images."
+        commandName: "ImageThumbnailCLI",
+        abstract: "A tool to generate thumbnails from various image formats including HEIF, JPEG, and Sony ARW files."
     )
 
-    @Argument(help: "The path to the HEIC or JPEG file")
+    @Argument(help: "The path to the image file (HEIF, JPEG, or Sony ARW)")
     var imagePath: String
 
     @Option(name: .shortAndLong, help: "The length of the thumbnail's short side")
@@ -109,7 +109,7 @@ struct HEICThumbnailCLI: AsyncParsableCommand {
                     logger.error("fail to extract Sony ARW thumbnail from file")
                 }
             } else {
-                logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, and JPEG are supported.")
+                logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, JPEG, and ARW are supported.")
             }
 
         } catch {

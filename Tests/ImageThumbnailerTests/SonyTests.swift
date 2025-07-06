@@ -1,5 +1,5 @@
 import Foundation
-@testable import HeifThumbnailer
+@testable import ImageThumbnailer
 import XCTest
 
 final class SonyTests: XCTestCase {
