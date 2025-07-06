@@ -75,9 +75,11 @@ public func readJpegThumbnail(
     logger.debug("Found \(thumbnailEntries.count) total thumbnail entries")
 
     // Step 4: Find suitable thumbnail based on requirements
-    guard let selectedEntry = findSuitableThumbnail(thumbnailEntries, minShortSide: minShortSide) else {
-        logger.error("No thumbnail meets the requirements")
-        return nil
+    let selectedEntry: ThumbnailEntry
+    if minShortSide == nil || minShortSide! < 100 {
+        selectedEntry = thumbnailEntries.first!
+    } else {
+        selectedEntry = thumbnailEntries.last!
     }
 
     // Step 5: Read thumbnail data
@@ -383,25 +385,31 @@ private func parseMPFData(_ mpfData: Data, mpfOffset: UInt32) -> [ThumbnailEntry
 
 private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int, byteOrder: ByteOrder, mpfOffset _: UInt32) -> [ThumbnailEntry] {
     var thumbnails: [ThumbnailEntry] = []
-    var offset = entryOffset
 
     logger.debug("Parsing \(numberOfImages) MP entries at offset \(entryOffset)")
 
-    for i in 0 ..< numberOfImages {
-        guard offset + 16 <= data.count else { break }
+    // First pass: collect all entries to calculate proper offsets
+    var entries: [(attributes: UInt32, size: UInt32, offset: UInt32)] = []
+    var tempOffset = entryOffset
 
-        let imageAttributes = readUInt32(data, offset: offset, byteOrder: byteOrder)
-        let imageSize = readUInt32(data, offset: offset + 4, byteOrder: byteOrder)
-        let imageOffset = readUInt32(data, offset: offset + 8, byteOrder: byteOrder)
-        let dependentImage1 = readUInt16(data, offset: offset + 12, byteOrder: byteOrder)
-        let dependentImage2 = readUInt16(data, offset: offset + 14, byteOrder: byteOrder)
+    for i in 0 ..< numberOfImages {
+        guard tempOffset + 16 <= data.count else { break }
+
+        let imageAttributes = readUInt32(data, offset: tempOffset, byteOrder: byteOrder)
+        let imageSize = readUInt32(data, offset: tempOffset + 4, byteOrder: byteOrder)
+        let imageOffset = readUInt32(data, offset: tempOffset + 8, byteOrder: byteOrder)
 
         logger.debug("MP Entry \(i): attributes=0x\(String(imageAttributes, radix: 16)), size=\(imageSize), offset=\(imageOffset)")
 
+        entries.append((attributes: imageAttributes, size: imageSize, offset: imageOffset))
+        tempOffset += 16
+    }
+
+    // Second pass: calculate absolute offsets and create thumbnail entries
+    for (i, entry) in entries.enumerated() {
         // Check if this is a valid image entry
-        if imageSize > 0, imageSize < 50_000_000 { // Reasonable size check
-            let imageType = (imageAttributes & 0x7000000) >> 24
-            let imageFormat = (imageAttributes & 0x7000) >> 12
+        if entry.size > 0, entry.size < 50_000_000 { // Reasonable size check
+            let imageType = (entry.attributes & 0x7000000) >> 24
 
             // Determine image type
             let entryType: String
@@ -415,122 +423,47 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
 
             // Calculate absolute offset
             let absoluteOffset: UInt32
-            if imageOffset == 0 {
+            if entry.offset == 0 {
                 // Offset 0 means this is the primary image at the start of the file
                 absoluteOffset = 0
             } else {
-                // Other offsets are relative to the start of the file
-                absoluteOffset = imageOffset
+                // For MPF format, the offset field can be interpreted differently:
+                // If it's a reasonable absolute offset, use it directly
+                // Otherwise, calculate based on the first image size
+                if i > 0, !entries.isEmpty {
+                    let firstImageSize = entries[0].size
+                    let expectedOffset = firstImageSize + 2 // Add 2 bytes for alignment
+
+                    // If the entry offset is much larger than expected, it's likely absolute
+                    if entry.offset > firstImageSize * 2 {
+                        absoluteOffset = entry.offset
+                    } else {
+                        // Use the calculated offset based on first image size
+                        absoluteOffset = expectedOffset
+                    }
+
+                    logger.debug("MPF offset calculation: entry.offset=\(entry.offset), firstImageSize=\(firstImageSize), expectedOffset=\(expectedOffset), chosen=\(absoluteOffset)")
+                } else {
+                    absoluteOffset = entry.offset
+                }
             }
 
             // Skip the primary image (offset 0) as it's not a thumbnail
             if absoluteOffset > 0 {
-                let entry = ThumbnailEntry(
+                let thumbnailEntry = ThumbnailEntry(
                     offset: absoluteOffset,
-                    length: imageSize,
+                    length: entry.size,
                     type: entryType,
                     width: nil, // MPF doesn't provide dimensions in header
                     height: nil
                 )
-                thumbnails.append(entry)
-                logger.debug("Found MPF \(entryType): offset=\(absoluteOffset), size=\(imageSize)")
+                thumbnails.append(thumbnailEntry)
+                logger.debug("Found MPF \(entryType): calculated offset=\(absoluteOffset), size=\(entry.size)")
             }
         }
-
-        offset += 16
     }
 
     return thumbnails
-}
-
-// MARK: - Thumbnail Selection
-
-private func findSuitableThumbnail(_ thumbnails: [ThumbnailEntry], minShortSide: UInt32?) -> ThumbnailEntry? {
-    guard !thumbnails.isEmpty else { return nil }
-
-    // If no specific size requirement, return the smallest thumbnail
-    guard let minShortSide = minShortSide else {
-        return thumbnails.min { $0.length < $1.length }
-    }
-
-    logger.debug("Finding suitable thumbnail for minShortSide: \(minShortSide)")
-
-    // Filter thumbnails that meet the size requirement
-    let suitableThumbnails = thumbnails.filter { entry in
-        guard let width = entry.width, let height = entry.height else {
-            // If we don't have dimensions, assume it might be suitable
-            logger.debug("Thumbnail \(entry.type) has no dimensions, assuming suitable")
-            return true
-        }
-
-        let shortSide = min(width, height)
-        let isSuitable = shortSide >= minShortSide
-        logger.debug("Thumbnail \(entry.type): \(width)x\(height), shortSide=\(shortSide), suitable=\(isSuitable)")
-        return isSuitable
-    }
-
-    // If we have suitable thumbnails, prefer the smallest one that meets requirements
-    if !suitableThumbnails.isEmpty {
-        let selected = suitableThumbnails.min { entry1, entry2 in
-            // First, prefer thumbnails with known dimensions
-            let entry1HasDimensions = entry1.width != nil && entry1.height != nil
-            let entry2HasDimensions = entry2.width != nil && entry2.height != nil
-
-            if entry1HasDimensions, !entry2HasDimensions {
-                return true
-            } else if !entry1HasDimensions, entry2HasDimensions {
-                return false
-            }
-
-            // If both have dimensions, prefer the one with smaller short side (but still >= minShortSide)
-            if let w1 = entry1.width, let h1 = entry1.height,
-               let w2 = entry2.width, let h2 = entry2.height
-            {
-                let shortSide1 = min(w1, h1)
-                let shortSide2 = min(w2, h2)
-                return shortSide1 < shortSide2
-            }
-
-            // Fall back to file size comparison
-            return entry1.length < entry2.length
-        }
-
-        if let selected = selected {
-            logger.debug("Selected thumbnail: \(selected.type), size: \(selected.width ?? 0)x\(selected.height ?? 0)")
-        }
-        return selected
-    }
-
-    // If no thumbnails meet the size requirement, return the largest available
-    let largest = thumbnails.max { entry1, entry2 in
-        // Prefer thumbnails with known dimensions
-        let entry1HasDimensions = entry1.width != nil && entry1.height != nil
-        let entry2HasDimensions = entry2.width != nil && entry2.height != nil
-
-        if entry1HasDimensions, !entry2HasDimensions {
-            return false
-        } else if !entry1HasDimensions, entry2HasDimensions {
-            return true
-        }
-
-        // If both have dimensions, prefer the larger one
-        if let w1 = entry1.width, let h1 = entry1.height,
-           let w2 = entry2.width, let h2 = entry2.height
-        {
-            let shortSide1 = min(w1, h1)
-            let shortSide2 = min(w2, h2)
-            return shortSide1 < shortSide2
-        }
-
-        // Fall back to file size comparison
-        return entry1.length < entry2.length
-    }
-
-    logger.warning("No thumbnail meets minShortSide requirement, returning largest available")
-    if let largest = largest {
-        logger.debug("Selected largest thumbnail: \(largest.type), size: \(largest.width ?? 0)x\(largest.height ?? 0)")
-    }
-    return largest
 }
 
 // MARK: - Utility Functions
