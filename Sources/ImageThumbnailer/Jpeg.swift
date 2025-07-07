@@ -387,7 +387,7 @@ private func parseMPFData(_ mpfData: Data, mpfOffset: UInt32) -> [ThumbnailEntry
     return thumbnails
 }
 
-private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int, byteOrder: ByteOrder, mpfOffset _: UInt32) -> [ThumbnailEntry] {
+private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int, byteOrder: ByteOrder, mpfOffset: UInt32) -> [ThumbnailEntry] {
     var thumbnails: [ThumbnailEntry] = []
 
     logger.debug("Parsing \(numberOfImages) MP entries at offset \(entryOffset)")
@@ -426,7 +426,7 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
     }
 
     // Process entries to create thumbnails
-    for (i, entry) in mpEntries.enumerated() {
+    for entry in mpEntries {
         // Skip invalid entries
         guard entry.length > 0, entry.length < 50_000_000 else { continue }
 
@@ -483,34 +483,13 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
         guard isPreview else { continue }
 
         // Calculate absolute offset
-        let absoluteOffset: UInt32
         if entry.start == 0 {
             // Offset 0 means this is the primary image at the start of the file
             // For thumbnails, this shouldn't happen, but handle it gracefully
             continue
-        } else {
-            // MPF offsets can be interpreted in different ways:
-            // 1. Absolute offset from start of file (most common)
-            // 2. Relative to end of primary image
-            // 3. Some cameras use different reference points
-
-            // Validate the offset makes sense
-            // If it's too small, it might be relative to something else
-            if entry.start < 1024, i > 0 {
-                // This looks like a relative offset, try to calculate absolute
-                // In some MPF implementations, offsets are relative to the end of the first image
-                if let firstEntry = mpEntries.first {
-                    let calculatedOffset = firstEntry.start + firstEntry.length
-                    logger.debug("MPF offset seems relative, trying calculated offset: \(calculatedOffset)")
-                    absoluteOffset = calculatedOffset
-                } else {
-                    absoluteOffset = entry.start
-                }
-            } else {
-                // Use as absolute offset
-                absoluteOffset = entry.start
-            }
         }
+        // MPF offsets are relative to the start of the APP2 segment
+        let absoluteOffset = entry.start + mpfOffset + 4
 
         let thumbnailEntry = ThumbnailEntry(
             offset: absoluteOffset,
