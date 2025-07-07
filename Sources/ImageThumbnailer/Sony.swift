@@ -11,15 +11,6 @@ import Logging
 
 private let logger = Logger(label: "com.hdremote.SonyArwThumbnailer")
 
-// MARK: - Public Types
-
-public struct SonyArwThumbnail {
-    public let data: Data
-    public let width: UInt32
-    public let height: UInt32
-    public let type: String // "preview", "thumbnail", or "jpgfromraw"
-}
-
 // MARK: - Internal Types
 
 private struct ThumbnailEntry {
@@ -47,10 +38,10 @@ private enum ByteOrder {
 ///   - readAt: Async function to read data at specific offset and length
 ///   - minShortSide: Minimum short side length in pixels. Returns the most suitable thumbnail.
 /// - Returns: Thumbnail data with metadata, or nil if extraction fails
-public func readSonyArwThumbnail(
+func readSonyArwThumbnail(
     readAt: @escaping (UInt64, UInt32) async throws -> Data,
     minShortSide: UInt32? = nil
-) async throws -> SonyArwThumbnail? {
+) async throws -> Thumbnail? {
     // Step 1: Read TIFF header and validate ARW format
     let headerData = try await readAt(0, 65536) // Read first 64KB to capture IFDs
     guard let header = parseTiffHeader(headerData) else {
@@ -98,11 +89,12 @@ public func readSonyArwThumbnail(
         ? (selectedEntry.width!, selectedEntry.height!)
         : getThumbnailDimensions(thumbnailData)
 
-    return SonyArwThumbnail(
+    return Thumbnail(
         data: thumbnailData,
+        format: .jpeg,
         width: width,
         height: height,
-        type: selectedEntry.type
+        rotation: 0
     )
 }
 

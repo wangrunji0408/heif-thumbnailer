@@ -11,15 +11,6 @@ import Logging
 
 private let logger = Logger(label: "com.hdremote.JpegThumbnailer")
 
-// MARK: - Public Types
-
-public struct JpegThumbnail {
-    public let data: Data
-    public let width: UInt32
-    public let height: UInt32
-    public let type: String // "thumbnail" or "preview"
-}
-
 // MARK: - Internal Types
 
 private struct ThumbnailEntry {
@@ -57,10 +48,10 @@ private enum ByteOrder {
 ///   - readAt: Async function to read data at specific offset and length
 ///   - minShortSide: Minimum short side length in pixels. Returns the most suitable thumbnail.
 /// - Returns: Thumbnail data with metadata, or nil if extraction fails
-public func readJpegThumbnail(
+func readJpegThumbnail(
     readAt: @escaping (UInt64, UInt32) async throws -> Data,
     minShortSide: UInt32? = nil
-) async throws -> JpegThumbnail? {
+) async throws -> Thumbnail? {
     // Step 1: Read JPEG header and find EXIF data and MPF data
     let headerData = try await readAt(0, 32768) // Read first 32KB to capture more segments
     guard let (exifData, exifOffset) = extractExifData(from: headerData) else {
@@ -98,11 +89,12 @@ public func readJpegThumbnail(
     // Step 6: Get thumbnail dimensions
     let (width, height) = getThumbnailDimensions(thumbnailData)
 
-    return JpegThumbnail(
+    return Thumbnail(
         data: thumbnailData,
+        format: .jpeg,
         width: width,
         height: height,
-        type: selectedEntry.type
+        rotation: 0
     )
 }
 

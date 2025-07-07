@@ -62,54 +62,33 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             // Determine file type and extract thumbnail accordingly
             let fileExtension = fileURL.pathExtension.lowercased()
 
-            if fileExtension == "heic" || fileExtension == "heif" {
-                // Extract HEIC thumbnail
-                if let thumbnail = try await readHeifThumbnail(
-                    readAt: readAt, minShortSide: shortSideLength
-                ) {
-                    logger.info(
-                        "success to extract HEIC thumbnail, size: \(thumbnail.data.count) bytes, type: \(thumbnail.type), rotation: \(thumbnail.rotation), image size: \(thumbnail.width)x\(thumbnail.height)"
-                    )
-
-                    // save thumbnail data
-                    let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(thumbnail.type)")
-                    try thumbnail.data.write(to: outputURL)
-                    logger.info("thumbnail saved to: \(outputURL.path)")
-                } else {
-                    logger.error("fail to extract HEIC thumbnail from file")
-                }
-            } else if fileExtension == "jpg" || fileExtension == "jpeg" {
-                // Extract JPEG thumbnail
-                if let thumbnail = try await readJpegThumbnail(
-                    readAt: readAt, minShortSide: shortSideLength
-                ) {
-                    logger.info(
-                        "success to extract JPEG thumbnail, size: \(thumbnail.data.count) bytes, type: \(thumbnail.type), image size: \(thumbnail.width)x\(thumbnail.height)"
-                    )
-
-                    // save thumbnail data
-                    let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.jpg")
-                    try thumbnail.data.write(to: outputURL)
-                    logger.info("thumbnail saved to: \(outputURL.path)")
-                } else {
-                    logger.error("fail to extract JPEG thumbnail from file")
-                }
-            } else if fileExtension == "arw" {
-                // Extract Sony ARW thumbnail
-                if let thumbnail = try await readSonyArwThumbnail(
-                    readAt: readAt, minShortSide: shortSideLength
-                ) {
-                    logger.info("success to extract Sony ARW thumbnail, size: \(thumbnail.data.count) bytes, type: \(thumbnail.type), image size: \(thumbnail.width)x\(thumbnail.height)")
-
-                    // save thumbnail data
-                    let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.jpg")
-                    try thumbnail.data.write(to: outputURL)
-                    logger.info("thumbnail saved to: \(outputURL.path)")
-                } else {
-                    logger.error("fail to extract Sony ARW thumbnail from file")
-                }
-            } else {
+            let fileType: FileFormat
+            switch fileExtension {
+            case "heic", "heif":
+                fileType = .heic
+            case "jpg", "jpeg":
+                fileType = .jpeg
+            case "arw":
+                fileType = .arw
+            default:
                 logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, JPEG, and ARW are supported.")
+                return
+            }
+
+            // Extract thumbnail
+            if let thumbnail = try await readThumbnail(
+                readAt: readAt, type: fileType, minShortSide: shortSideLength
+            ) {
+                logger.info(
+                    "success to extract thumbnail, size: \(thumbnail.data.count) bytes, format: \(thumbnail.format), rotation: \(thumbnail.rotation), image size: \(thumbnail.width ?? 0)x\(thumbnail.height ?? 0)"
+                )
+
+                // save thumbnail data
+                let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(thumbnail.format)")
+                try thumbnail.data.write(to: outputURL)
+                logger.info("thumbnail saved to: \(outputURL.path)")
+            } else {
+                logger.error("fail to extract HEIC thumbnail from file")
             }
 
         } catch {
