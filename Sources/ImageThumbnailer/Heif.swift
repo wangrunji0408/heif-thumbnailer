@@ -7,15 +7,6 @@ private let logger = Logger(label: "com.hdremote.HeifThumbnailer")
 
 // MARK: - Public Types
 
-public struct ImageSize {
-    public let width: UInt32
-    public let height: UInt32
-
-    var shortSide: UInt32 {
-        min(width, height)
-    }
-}
-
 // MARK: - Internal Types
 
 struct ThumbnailInfo {

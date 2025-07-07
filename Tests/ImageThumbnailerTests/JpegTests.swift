@@ -32,8 +32,12 @@ final class JpegTests: XCTestCase {
 
         if let thumbnail = thumbnail {
             XCTAssertGreaterThan(thumbnail.data.count, 0, "Thumbnail data should not be empty")
-            XCTAssertGreaterThan(thumbnail.width, 0, "Thumbnail width should be greater than 0")
-            XCTAssertGreaterThan(thumbnail.height, 0, "Thumbnail height should be greater than 0")
+            if let width = thumbnail.width {
+                XCTAssertGreaterThan(Int(width), 0, "Thumbnail width should be greater than 0")
+            }
+            if let height = thumbnail.height {
+                XCTAssertGreaterThan(Int(height), 0, "Thumbnail height should be greater than 0")
+            }
         }
     }
 
@@ -87,18 +91,20 @@ final class JpegTests: XCTestCase {
             let thumbnail = try await readJpegThumbnail(readAt: readAt, minShortSide: minShortSide)
 
             if let thumbnail = thumbnail {
-                let shortSide = min(thumbnail.width, thumbnail.height)
-                print("[\(description)] Selected: \(thumbnail.type), size: \(thumbnail.width)x\(thumbnail.height), shortSide: \(shortSide)")
+                if let width = thumbnail.width, let height = thumbnail.height {
+                    let shortSide = min(width, height)
+                    print("[\(description)] Selected: \(thumbnail.format), size: \(width)x\(height), shortSide: \(shortSide)")
 
-                // If minShortSide is specified, the selected thumbnail should ideally meet the requirement
-                // or be the largest available if no thumbnail meets the requirement
-                if let minShortSide = minShortSide {
-                    // We can't enforce this strictly because the image might not have thumbnails
-                    // that meet the requirement, but we can log it for verification
-                    if shortSide >= minShortSide {
-                        print("✓ Thumbnail meets size requirement")
-                    } else {
-                        print("⚠ Thumbnail doesn't meet size requirement (likely largest available)")
+                    // If minShortSide is specified, the selected thumbnail should ideally meet the requirement
+                    // or be the largest available if no thumbnail meets the requirement
+                    if let minShortSide = minShortSide {
+                        // We can't enforce this strictly because the image might not have thumbnails
+                        // that meet the requirement, but we can log it for verification
+                        if shortSide >= minShortSide {
+                            print("✓ Thumbnail meets size requirement")
+                        } else {
+                            print("⚠ Thumbnail doesn't meet size requirement (likely largest available)")
+                        }
                     }
                 }
             } else {

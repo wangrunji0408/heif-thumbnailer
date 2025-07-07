@@ -28,11 +28,14 @@ final class SonyTests: XCTestCase {
 
         if let thumbnail = thumbnail {
             XCTAssertGreaterThan(thumbnail.data.count, 0, "Thumbnail data should not be empty")
-            XCTAssertGreaterThan(thumbnail.width, 0, "Thumbnail width should be greater than 0")
-            XCTAssertGreaterThan(thumbnail.height, 0, "Thumbnail height should be greater than 0")
-            XCTAssertFalse(thumbnail.type.isEmpty, "Thumbnail type should not be empty")
+            if let width = thumbnail.width {
+                XCTAssertGreaterThan(Int(width), 0, "Thumbnail width should be greater than 0")
+            }
+            if let height = thumbnail.height {
+                XCTAssertGreaterThan(Int(height), 0, "Thumbnail height should be greater than 0")
+            }
 
-            print("Extracted thumbnail: \(thumbnail.width)x\(thumbnail.height), type: \(thumbnail.type), size: \(thumbnail.data.count) bytes")
+            print("Extracted thumbnail: \(thumbnail.width ?? 0)x\(thumbnail.height ?? 0), format: \(thumbnail.format), size: \(thumbnail.data.count) bytes")
         }
     }
 
@@ -60,10 +63,12 @@ final class SonyTests: XCTestCase {
         XCTAssertNotNil(thumbnail, "Should extract thumbnail from ARW file with min size")
 
         if let thumbnail = thumbnail {
-            let minSide = min(thumbnail.width, thumbnail.height)
-            XCTAssertGreaterThanOrEqual(minSide, 500, "Thumbnail should meet minimum size requirement")
+            if let width = thumbnail.width, let height = thumbnail.height {
+                let minSide = min(width, height)
+                XCTAssertGreaterThanOrEqual(minSide, 500, "Thumbnail should meet minimum size requirement")
+            }
 
-            print("Extracted thumbnail with min size: \(thumbnail.width)x\(thumbnail.height), type: \(thumbnail.type), size: \(thumbnail.data.count) bytes")
+            print("Extracted thumbnail with min size: \(thumbnail.width ?? 0)x\(thumbnail.height ?? 0), format: \(thumbnail.format), size: \(thumbnail.data.count) bytes")
         }
     }
 

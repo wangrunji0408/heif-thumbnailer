@@ -11,6 +11,15 @@ import ImageIO
     public typealias PlatformImage = NSImage
 #endif
 
+public struct ImageSize {
+    public let width: UInt32
+    public let height: UInt32
+
+    public var shortSide: UInt32 {
+        min(width, height)
+    }
+}
+
 public struct Thumbnail {
     public let data: Data
     public let format: FileFormat
@@ -23,6 +32,7 @@ public enum FileFormat {
     case heic
     case jpeg
     case arw
+    case mp4
 }
 
 /// Efficiently read thumbnail from a HEIC file with minimal read operations
@@ -42,6 +52,8 @@ public func readThumbnail(
         return try await readJpegThumbnail(readAt: readAt, minShortSide: minShortSide)
     case .arw:
         return try await readSonyArwThumbnail(readAt: readAt, minShortSide: minShortSide)
+    case .mp4:
+        return try await readMp4Thumbnail(readAt: readAt, minShortSide: minShortSide)
     }
 }
 

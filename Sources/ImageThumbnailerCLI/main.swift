@@ -70,8 +70,10 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 fileType = .jpeg
             case "arw":
                 fileType = .arw
+            case "mp4":
+                fileType = .mp4
             default:
-                logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, JPEG, and ARW are supported.")
+                logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, JPEG, ARW, and MP4 are supported.")
                 return
             }
 
