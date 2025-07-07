@@ -37,9 +37,8 @@ func readMp4Thumbnail(
     readAt: @escaping (UInt64, UInt32) async throws -> Data,
     minShortSide: UInt32? = nil
 ) async throws -> Thumbnail? {
-    // Step 1: 读取文件头部，查找moov box的位置（最多读取30MB）
-    let headerSize: UInt32 = 30 * 1024 * 1024 // 30MB header
-    let headerData = try await readAt(0, headerSize)
+    // Step 1: 读取文件头部
+    let headerData = try await readAt(0, 1024)
 
     logger.debug("Read header: \(headerData.count) bytes")
 
@@ -50,33 +49,15 @@ func readMp4Thumbnail(
     }
 
     // 查找moov box
-    guard let moovOffset = findMoovBoxInHeader(data: headerData) else {
+    guard let (moovOffset, moovSize) = try await findMoovBoxInHeader(headerData: headerData, readAt: readAt) else {
         logger.debug("moov box not found in header")
         return nil
     }
 
-    logger.debug("Found moov box at offset: \(moovOffset)")
+    logger.debug("Found moov box at offset: \(moovOffset), size: \(moovSize)")
 
-    // Step 2: 从第一次读取的header数据中提取moov box大小和内容
-    let moovSizeData = headerData.subdata(in: Int(moovOffset) ..< Int(moovOffset + 4))
-    let moovSize = moovSizeData.withUnsafeBytes { bytes in
-        bytes.bindMemory(to: UInt32.self).first?.bigEndian ?? 0
-    }
-
-    logger.debug("Moov box size from header: \(moovSize)")
-
-    // 如果moov box在header范围内，直接使用；否则需要额外读取
-    let moovData: Data
-    if moovOffset + UInt64(moovSize) <= headerData.count {
-        // moov box完全在header中
-        moovData = headerData.subdata(in: Int(moovOffset + 8) ..< Int(moovOffset + UInt64(moovSize)))
-        logger.debug("Using moov data from header cache: \(moovData.count) bytes")
-    } else {
-        // 需要额外读取moov box（这是第二次读取）
-        let actualReadSize = min(UInt32(500 * 1024), moovSize - 8)
-        moovData = try await readAt(moovOffset + 8, actualReadSize)
-        logger.debug("Read additional moov data: \(moovData.count) bytes")
-    }
+    let moovData = try await readAt(moovOffset + 8, moovSize - 8)
+    logger.debug("Read additional moov data: \(moovData.count) bytes")
 
     // 解析moov box，查找缩略图
     let imageInfos = parseMoovBox(data: moovData)
@@ -110,25 +91,32 @@ func readMp4Thumbnail(
 private func validateMp4Format(data: Data) -> Bool {
     guard data.count >= 8 else { return false }
 
-    let size = data.subdata(in: 0 ..< 4).withUnsafeBytes { bytes in
-        bytes.bindMemory(to: UInt32.self).first?.bigEndian ?? 0
-    }
+    let size = data.subdata(in: 0 ..< 4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
     let type = String(data: data.subdata(in: 4 ..< 8), encoding: .ascii) ?? ""
 
     return size >= 8 && type == "ftyp"
 }
 
-private func findMoovBoxInHeader(data: Data) -> UInt64? {
+private func findMoovBoxInHeader(headerData: Data, readAt: @escaping (UInt64, UInt32) async throws -> Data) async throws -> (UInt64, UInt32)? {
     var offset: UInt64 = 0
 
-    while offset + 8 <= data.count {
-        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { bytes in
-            bytes.bindMemory(to: UInt32.self).first?.bigEndian ?? 0
+    while true {
+        let data: Data
+        if offset + 8 <= headerData.count {
+            data = headerData.subdata(in: Int(offset) ..< Int(offset + 8))
+        } else {
+            data = try await readAt(offset, 8)
         }
-        let boxType = String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
+
+        if data.count < 8 {
+            return nil
+        }
+
+        let boxSize = data.subdata(in: 0 ..< 4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let boxType = String(data: data.subdata(in: 4 ..< 8), encoding: .ascii) ?? ""
 
         if boxType == "moov" {
-            return offset
+            return (offset, boxSize)
         }
 
         if boxSize <= 8 {
@@ -136,23 +124,14 @@ private func findMoovBoxInHeader(data: Data) -> UInt64? {
         } else {
             offset += UInt64(boxSize)
         }
-
-        // 避免无限循环
-        if offset >= UInt64(data.count) {
-            break
-        }
     }
-
-    return nil
 }
 
 private func parseMoovBox(data: Data) -> [Mp4ImageInfo] {
     logger.debug("Parsing moov box, size: \(data.count)")
     var imageInfos: [Mp4ImageInfo] = []
 
-    // 尝试两种结构：moov/udta/meta/ilst 和 moov/meta/ilst
-
-    // 方法1: 在moov box中查找udta box
+    // 尝试：moov/udta/meta/ilst
     if let udtaData = findBoxData(in: data, boxType: "udta") {
         logger.debug("Found udta box, size: \(udtaData.count)")
         // 在udta box中查找meta box
@@ -163,16 +142,6 @@ private func parseMoovBox(data: Data) -> [Mp4ImageInfo] {
                 logger.debug("Found ilst box in udta/meta, size: \(ilstData.count)")
                 imageInfos.append(contentsOf: parseIlstBox(data: ilstData))
             }
-        }
-    }
-
-    // 方法2: 直接在moov box中查找meta box
-    if let metaData = findBoxData(in: data, boxType: "meta") {
-        logger.debug("Found meta box directly in moov, size: \(metaData.count)")
-        // 在meta box中查找ilst box
-        if let ilstData = findBoxData(in: metaData, boxType: "ilst") {
-            logger.debug("Found ilst box in meta, size: \(ilstData.count)")
-            imageInfos.append(contentsOf: parseIlstBox(data: ilstData))
         }
     }
 
@@ -187,9 +156,7 @@ private func findBoxData(in data: Data, boxType: String) -> Data? {
     // 不预先跳过，在找到meta box时再处理version/flags
 
     while offset + 8 <= data.count {
-        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { bytes in
-            bytes.bindMemory(to: UInt32.self).first?.bigEndian ?? 0
-        }
+        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         let foundType = String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
 
         boxCount += 1
@@ -240,9 +207,7 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
     var itemCount = 0
 
     while offset + 8 <= data.count {
-        let itemSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { bytes in
-            bytes.bindMemory(to: UInt32.self).first?.bigEndian ?? 0
-        }
+        let itemSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
 
         guard itemSize > 8, offset + UInt64(itemSize) <= data.count else {
             offset += 8
@@ -291,9 +256,7 @@ private func extractImageFromItem(data: Data, type: ImageType) -> Mp4ImageInfo? 
     var offset: UInt64 = 0
 
     while offset + 8 <= data.count {
-        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { bytes in
-            bytes.bindMemory(to: UInt32.self).first?.bigEndian ?? 0
-        }
+        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         let boxType = String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
 
         if boxType == "data", boxSize > 16 {
