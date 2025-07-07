@@ -9,21 +9,6 @@ private struct Mp4ImageInfo {
     let data: Data
     let width: UInt32?
     let height: UInt32?
-    let type: ImageType
-}
-
-private enum ImageType {
-    case thumbnail
-    case preview
-    case cover
-
-    var priority: Int {
-        switch self {
-        case .thumbnail: return 3 // 最高优先级
-        case .preview: return 2
-        case .cover: return 1
-        }
-    }
 }
 
 // MARK: - Public API
@@ -75,7 +60,7 @@ func readMp4Thumbnail(
         return nil
     }
 
-    logger.debug("Selected thumbnail: \(selectedImage.width ?? 0)x\(selectedImage.height ?? 0), type: \(selectedImage.type)")
+    logger.debug("Selected thumbnail: \(selectedImage.width ?? 0)x\(selectedImage.height ?? 0)")
 
     return Thumbnail(
         data: selectedImage.data,
@@ -225,21 +210,21 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
         if itemName == "covr" {
             // Cover Art
             logger.debug("Processing Cover Art item")
-            if let imageData = extractImageFromItem(data: itemData, type: .cover) {
+            if let imageData = extractImageFromItem(data: itemData) {
                 imageInfos.append(imageData)
                 logger.debug("Added Cover Art: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
             }
         } else if itemName == "snal" {
             // PreviewImage
             logger.debug("Processing PreviewImage item")
-            if let imageData = extractImageFromItem(data: itemData, type: .preview) {
+            if let imageData = extractImageFromItem(data: itemData) {
                 imageInfos.append(imageData)
                 logger.debug("Added PreviewImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
             }
         } else if itemName == "tnal" {
             // ThumbnailImage
             logger.debug("Processing ThumbnailImage item")
-            if let imageData = extractImageFromItem(data: itemData, type: .thumbnail) {
+            if let imageData = extractImageFromItem(data: itemData) {
                 imageInfos.append(imageData)
                 logger.debug("Added ThumbnailImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
             }
@@ -251,8 +236,8 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
     return imageInfos
 }
 
-private func extractImageFromItem(data: Data, type: ImageType) -> Mp4ImageInfo? {
-    logger.debug("extractImageFromItem: size=\(data.count), type=\(type)")
+private func extractImageFromItem(data: Data) -> Mp4ImageInfo? {
+    logger.debug("extractImageFromItem: size=\(data.count)")
     var offset: UInt64 = 0
 
     while offset + 8 <= data.count {
@@ -264,7 +249,7 @@ private func extractImageFromItem(data: Data, type: ImageType) -> Mp4ImageInfo? 
             let imageData = data.subdata(in: Int(offset + 16) ..< Int(offset + UInt64(boxSize)))
             if isJpegData(imageData) {
                 let (width, height) = extractJpegDimensions(data: imageData)
-                return Mp4ImageInfo(data: imageData, width: width, height: height, type: type)
+                return Mp4ImageInfo(data: imageData, width: width, height: height)
             }
         }
 
@@ -287,22 +272,7 @@ private func searchForThumbnailInItem(data: Data) -> Mp4ImageInfo? {
 
     let (width, height) = extractJpegDimensions(data: imageData)
 
-    // 根据尺寸判断类型
-    let type: ImageType
-    if let w = width, let h = height {
-        let shortSide = min(w, h)
-        if shortSide <= 200 {
-            type = .thumbnail
-        } else if shortSide <= 800 {
-            type = .preview
-        } else {
-            type = .cover
-        }
-    } else {
-        type = .thumbnail
-    }
-
-    return Mp4ImageInfo(data: imageData, width: width, height: height, type: type)
+    return Mp4ImageInfo(data: imageData, width: width, height: height)
 }
 
 // MARK: - Utility Functions
@@ -361,15 +331,9 @@ private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt3
 private func selectBestThumbnail(_ imageInfos: [Mp4ImageInfo], minShortSide: UInt32?) -> Mp4ImageInfo? {
     guard !imageInfos.isEmpty else { return nil }
 
-    let sortedImages = imageInfos.sorted { first, second in
-        // 首先按类型优先级排序
-        if first.type.priority != second.type.priority {
-            return first.type.priority > second.type.priority
-        }
-
-        // 然后按尺寸排序
-        let firstShortSide = min(first.width ?? 0, first.height ?? 0)
-        let secondShortSide = min(second.width ?? 0, second.height ?? 0)
+    let sortedImages = imageInfos.sorted {
+        let firstShortSide = min($0.width ?? 0, $0.height ?? 0)
+        let secondShortSide = min($1.width ?? 0, $1.height ?? 0)
         return firstShortSide < secondShortSide
     }
 
@@ -384,5 +348,5 @@ private func selectBestThumbnail(_ imageInfos: [Mp4ImageInfo], minShortSide: UIn
     }
 
     // 如果没有找到满足要求的，返回最佳的可用图像
-    return sortedImages.first
+    return sortedImages.last
 }
