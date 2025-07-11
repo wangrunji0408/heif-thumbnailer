@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Logging
+import UniformTypeIdentifiers
 
 #if canImport(UIKit)
     import UIKit
@@ -88,13 +89,19 @@ func readJpegThumbnail(
     }
 
     // Step 5: Read thumbnail data
-    let thumbnailData = try await reader.readAt(offset: UInt64(selectedEntry.offset), length: selectedEntry.length)
+    var thumbnailData = try await reader.readAt(offset: UInt64(selectedEntry.offset), length: selectedEntry.length)
 
     // Step 6: Get thumbnail dimensions
     let (width, height) = getThumbnailDimensions(thumbnailData)
 
     // Step 7: Convert EXIF orientation to rotation degrees
-    let rotation = orientationToRotation(orientation)
+    let (rotation, flip) = orientationToRotation(orientation)
+
+    // Step 8: Apply orientation correction if requested
+    if rotation != 0 || flip {
+        logger.debug("Applying orientation correction: \(rotation) degrees, flip: \(flip)")
+        thumbnailData = applyOrientationCorrection(to: thumbnailData, rotation: rotation, flip: flip) ?? thumbnailData
+    }
 
     return Thumbnail(
         data: thumbnailData,
@@ -103,6 +110,50 @@ func readJpegThumbnail(
         height: height,
         rotation: rotation
     )
+}
+
+/// Apply orientation correction to thumbnail data and return corrected Data
+/// - Parameters:
+///   - thumbnailData: Original thumbnail data
+///   - rotation: Rotation degrees (0, 90, 180, 270)
+/// - Returns: Corrected thumbnail data, or nil if correction fails
+func applyOrientationCorrection(to thumbnailData: Data, rotation: Int, flip: Bool) -> Data? {
+    // If no rotation needed, return original data
+    guard rotation != 0 || flip else { return thumbnailData }
+
+    // Create CGImage from thumbnail data
+    guard let imageSource = CGImageSourceCreateWithData(thumbnailData as CFData, nil),
+          let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+    else {
+        logger.error("Failed to create CGImage from thumbnail data")
+        return nil
+    }
+
+    // Apply rotation
+    let rotatedImage = rotateCGImage(cgImage, by: rotation, flip: flip)
+
+    // Convert back to JPEG data
+    guard let mutableData = CFDataCreateMutable(nil, 0),
+          let destination = CGImageDestinationCreateWithData(mutableData, UTType.jpeg.identifier as CFString, 1, nil)
+    else {
+        logger.error("Failed to create image destination")
+        return nil
+    }
+
+    // Set JPEG compression quality
+    let options: [CFString: Any] = [
+        kCGImageDestinationLossyCompressionQuality: 0.9,
+    ]
+
+    CGImageDestinationAddImage(destination, rotatedImage, options as CFDictionary)
+
+    guard CGImageDestinationFinalize(destination) else {
+        logger.error("Failed to finalize image destination")
+        return nil
+    }
+
+    logger.debug("Successfully applied orientation correction")
+    return mutableData as Data
 }
 
 // MARK: - EXIF Data Extraction
@@ -504,17 +555,46 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
 
 // MARK: - Utility Functions
 
-private func orientationToRotation(_ orientation: UInt16) -> Int {
+private func rotateCGImage(_ image: CGImage, by degrees: Int, flip: Bool) -> CGImage {
+    let normalizedDegrees = ((degrees % 360) + 360) % 360
+    guard normalizedDegrees != 0 || flip else { return image }
+
+    let (width, height) = (image.width, image.height)
+    let (newWidth, newHeight) =
+        (normalizedDegrees == 90 || normalizedDegrees == 270) ? (height, width) : (width, height)
+
+    guard let colorSpace = image.colorSpace,
+          let context = CGContext(
+              data: nil, width: newWidth, height: newHeight,
+              bitsPerComponent: image.bitsPerComponent, bytesPerRow: 0,
+              space: colorSpace, bitmapInfo: image.bitmapInfo.rawValue
+          )
+    else {
+        return image
+    }
+
+    context.translateBy(x: CGFloat(newWidth) / 2, y: CGFloat(newHeight) / 2)
+    if flip {
+        context.scaleBy(x: -1, y: 1)
+    }
+    context.rotate(by: -CGFloat(normalizedDegrees) * .pi / 180)
+    context.translateBy(x: -CGFloat(width) / 2, y: -CGFloat(height) / 2)
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+    return context.makeImage() ?? image
+}
+
+private func orientationToRotation(_ orientation: UInt16) -> (Int, Bool) {
     switch orientation {
-    case 1: return 0 // Normal
-    case 2: return 0 // Mirror horizontal (no rotation, just flip)
-    case 3: return 180 // Rotate 180°
-    case 4: return 180 // Mirror vertical (180° + flip)
-    case 5: return 270 // Mirror horizontal and rotate 270° CW
-    case 6: return 90 // Rotate 90° CW
-    case 7: return 90 // Mirror horizontal and rotate 90° CW
-    case 8: return 270 // Rotate 270° CW
-    default: return 0 // Unknown orientation, default to normal
+    case 1: return (0, false) // Normal
+    case 2: return (0, true) // Mirror horizontal (no rotation, just flip)
+    case 3: return (180, false) // Rotate 180°
+    case 4: return (180, true) // Mirror vertical (180° + flip)
+    case 5: return (270, true) // Mirror horizontal and rotate 270° CW
+    case 6: return (90, false) // Rotate 90° CW
+    case 7: return (90, true) // Mirror horizontal and rotate 90° CW
+    case 8: return (270, false) // Rotate 270° CW
+    default: return (0, false) // Unknown orientation, default to normal
     }
 }
 

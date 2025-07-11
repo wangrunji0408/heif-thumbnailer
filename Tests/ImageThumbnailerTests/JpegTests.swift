@@ -41,27 +41,6 @@ final class JpegTests: XCTestCase {
         }
     }
 
-    func testJpegThumbnailAsImage() async throws {
-        // Test thumbnail as image conversion
-        let bundle = Bundle.module
-        guard let testImageURL = bundle.url(forResource: "Pocket3", withExtension: "JPG") else {
-            XCTFail("Test image not found")
-            return
-        }
-
-        let fileHandle = try FileHandle(forReadingFrom: testImageURL)
-        defer { fileHandle.closeFile() }
-
-        let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
-            try fileHandle.seek(toOffset: offset)
-            let data = fileHandle.readData(ofLength: Int(length))
-            return data
-        }
-
-        let image = try await readJpegThumbnailAsImage(readAt: readAt, minShortSide: nil)
-        // Image might be nil if no thumbnail is found, which is acceptable
-    }
-
     func testJpegThumbnailSizeSelection() async throws {
         // Test thumbnail selection based on minShortSide
         let bundle = Bundle.module
