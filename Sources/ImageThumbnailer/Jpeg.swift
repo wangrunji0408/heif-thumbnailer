@@ -52,9 +52,11 @@ func readJpegThumbnail(
     readAt: @escaping (UInt64, UInt32) async throws -> Data,
     minShortSide: UInt32? = nil
 ) async throws -> Thumbnail? {
+    let reader = Reader(readAt: readAt)
+
     // Step 1: Read JPEG header and find EXIF data and MPF data
-    let headerData = try await readAt(0, 32768) // Read first 32KB to capture more segments
-    guard let (exifData, exifOffset) = extractExifData(from: headerData) else {
+    try await reader.prefetch(offset: 0, length: 16384)
+    guard let (exifData, exifOffset) = try await extractExifData(from: reader) else {
         logger.error("No EXIF data found in JPEG file")
         return nil
     }
@@ -65,7 +67,7 @@ func readJpegThumbnail(
     var thumbnailEntries = parseExifForThumbnails(exifData, exifOffset: exifOffset)
 
     // Step 3: Look for MPF data in APP2 segments
-    let mpfEntries = extractMPFThumbnails(from: headerData)
+    let mpfEntries = try await extractMPFThumbnails(from: reader)
     thumbnailEntries.append(contentsOf: mpfEntries)
 
     guard !thumbnailEntries.isEmpty else {
@@ -84,7 +86,7 @@ func readJpegThumbnail(
     }
 
     // Step 5: Read thumbnail data
-    let thumbnailData = try await readAt(UInt64(selectedEntry.offset), selectedEntry.length)
+    let thumbnailData = try await reader.readAt(offset: UInt64(selectedEntry.offset), length: selectedEntry.length)
 
     // Step 6: Get thumbnail dimensions
     let (width, height) = getThumbnailDimensions(thumbnailData)
@@ -98,24 +100,11 @@ func readJpegThumbnail(
     )
 }
 
-/// Convenience function to extract thumbnail as platform image
-public func readJpegThumbnailAsImage(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data,
-    minShortSide: UInt32? = nil
-) async throws -> PlatformImage? {
-    guard let thumbnail = try await readJpegThumbnail(readAt: readAt, minShortSide: minShortSide) else {
-        return nil
-    }
-    return createImageFromThumbnailData(thumbnail.data)
-}
-
 // MARK: - EXIF Data Extraction
 
-private func extractExifData(from data: Data) -> (Data, UInt32)? {
-    guard data.count >= 4 else { return nil }
-
+private func extractExifData(from reader: Reader) async throws -> (Data, UInt32)? {
     // Check for JPEG SOI marker
-    guard data[0] == 0xFF, data[1] == 0xD8 else {
+    guard try await reader.readAt(offset: 0, length: 2) == Data([0xFF, 0xD8]) else {
         logger.error("Not a valid JPEG file")
         return nil
     }
@@ -123,24 +112,19 @@ private func extractExifData(from data: Data) -> (Data, UInt32)? {
     var offset = 2
 
     // Search for EXIF segment (APP1 with EXIF identifier)
-    while offset + 4 < data.count {
-        guard data[offset] == 0xFF else { break }
+    while true {
+        let header = try await reader.readAt(offset: UInt64(offset), length: 4)
+        guard header.count == 4, header[0] == 0xFF else { break }
 
-        let marker = data[offset + 1]
-        let segmentLength = UInt16(data[offset + 2]) << 8 | UInt16(data[offset + 3])
+        let marker = header[1]
+        let segmentLength = UInt16(header[2]) << 8 | UInt16(header[3])
 
         if marker == 0xE1 { // APP1 segment
-            let segmentEnd = offset + 2 + Int(segmentLength)
-            guard segmentEnd <= data.count else { break }
-
-            let segmentData = data.subdata(in: offset + 4 ..< segmentEnd)
-            if segmentData.count >= 6 {
-                let exifIdentifier = segmentData.subdata(in: 0 ..< 4)
-                if exifIdentifier == Data([0x45, 0x78, 0x69, 0x66]) { // "Exif"
-                    logger.debug("Found EXIF data at offset \(offset + 4)")
-                    let exifOffset = UInt32(offset + 10) // offset + 4 (segment header) + 6 (Exif\0\0)
-                    return (segmentData.subdata(in: 6 ..< segmentData.count), exifOffset) // Skip "Exif\0\0"
-                }
+            let segmentData = try await reader.readAt(offset: UInt64(offset + 4), length: UInt32(segmentLength))
+            if segmentData.starts(with: "Exif".data(using: .ascii)!) {
+                logger.debug("Found EXIF data at offset \(offset + 4)")
+                let exifOffset = UInt32(offset + 10) // offset + 4 (segment header) + 6 (Exif\0\0)
+                return (segmentData.subdata(in: 6 ..< segmentData.count), exifOffset) // Skip "Exif\0\0"
             }
         }
 
@@ -266,34 +250,28 @@ private func parseIFD(_ data: Data, offset: Int, byteOrder: ByteOrder, exifOffse
 
 // MARK: - MPF Data Extraction
 
-private func extractMPFThumbnails(from data: Data) -> [ThumbnailEntry] {
-    var thumbnails: [ThumbnailEntry] = []
+private func extractMPFThumbnails(from reader: Reader) async throws -> [ThumbnailEntry] {
     var offset = 2 // Skip JPEG SOI marker
 
     // Search for APP2 segments that contain MPF data
-    while offset + 4 < data.count {
-        guard data[offset] == 0xFF else { break }
+    while true {
+        try await reader.prefetch(offset: UInt64(offset), length: 256)
+        let header = try await reader.readAt(offset: UInt64(offset), length: 4)
+        guard header.count == 4, header[0] == 0xFF else { break }
 
-        let marker = data[offset + 1]
-        let segmentLength = UInt16(data[offset + 2]) << 8 | UInt16(data[offset + 3])
+        let marker = header[1]
+        let segmentLength = UInt16(header[2]) << 8 | UInt16(header[3])
 
         if marker == 0xE2 { // APP2 segment
-            let segmentEnd = offset + 2 + Int(segmentLength)
-            guard segmentEnd <= data.count else { break }
-
-            let segmentData = data.subdata(in: offset + 4 ..< segmentEnd)
-            if segmentData.count >= 4 {
-                let mpfIdentifier = segmentData.subdata(in: 0 ..< 4)
-                // Check for both "MPF\0" and "MPF " (space) variants
-                if mpfIdentifier == Data([0x4D, 0x50, 0x46, 0x00]) || // "MPF\0"
-                    mpfIdentifier == Data([0x4D, 0x50, 0x46, 0x20])
-                { // "MPF "
-                    logger.debug("Found MPF data in APP2 segment at offset \(offset + 4), segment size: \(segmentData.count)")
-                    let mpfOffset = UInt32(offset + 4)
-                    let mpfEntries = parseMPFData(segmentData, mpfOffset: mpfOffset)
-                    logger.debug("MPF parsing returned \(mpfEntries.count) entries")
-                    thumbnails.append(contentsOf: mpfEntries)
-                }
+            let segmentData = try await reader.readAt(offset: UInt64(offset + 4), length: UInt32(segmentLength))
+            if segmentData.starts(with: "MPF\0".data(using: .ascii)!) ||
+                segmentData.starts(with: "MPF ".data(using: .ascii)!)
+            {
+                logger.debug("Found MPF data in APP2 segment at offset \(offset + 4), segment size: \(segmentData.count)")
+                let mpfOffset = UInt32(offset + 4)
+                let mpfEntries = parseMPFData(segmentData, mpfOffset: mpfOffset)
+                logger.debug("MPF parsing returned \(mpfEntries.count) entries")
+                return mpfEntries
             }
         }
 
@@ -301,7 +279,7 @@ private func extractMPFThumbnails(from data: Data) -> [ThumbnailEntry] {
         offset += 2 + Int(segmentLength)
     }
 
-    return thumbnails
+    return []
 }
 
 private func parseMPFData(_ mpfData: Data, mpfOffset: UInt32) -> [ThumbnailEntry] {
