@@ -20,6 +20,16 @@ private struct ThumbnailEntry {
     let type: String
     let width: UInt32?
     let height: UInt32?
+
+    var inferedShortSide: UInt32 {
+        if let width = width, let height = height {
+            return min(width, height)
+        }
+        // infer from length
+        let length = Double(length)
+        let side = sqrt(length / 2)
+        return UInt32(side)
+    }
 }
 
 private struct MPImageEntry {
@@ -81,11 +91,10 @@ func readJpegThumbnail(
     logger.debug("Found \(thumbnailEntries.count) total thumbnail entries")
 
     // Step 4: Find suitable thumbnail based on requirements
-    let selectedEntry: ThumbnailEntry
-    if minShortSide == nil || minShortSide! < 100 {
-        selectedEntry = thumbnailEntries.first!
-    } else {
-        selectedEntry = thumbnailEntries.last!
+    thumbnailEntries.sort { $0.inferedShortSide < $1.inferedShortSide }
+    guard let selectedEntry = thumbnailEntries.first(where: { $0.inferedShortSide >= minShortSide ?? 0 }) else {
+        logger.error("No thumbnail found with short side >= \(minShortSide ?? 0)")
+        return nil
     }
 
     // Step 5: Read thumbnail data

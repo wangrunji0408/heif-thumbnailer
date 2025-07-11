@@ -64,7 +64,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
 
             let fileType: FileFormat
             switch fileExtension {
-            case "heic", "heif":
+            case "heic", "heif", "hif":
                 fileType = .heic
             case "jpg", "jpeg":
                 fileType = .jpeg
