@@ -63,8 +63,10 @@ func readJpegThumbnail(
 
     logger.debug("Found EXIF data at offset \(exifOffset), size: \(exifData.count) bytes")
 
-    // Step 2: Parse EXIF data to find thumbnail entries
-    var thumbnailEntries = parseExifForThumbnails(exifData, exifOffset: exifOffset)
+    // Step 2: Parse EXIF data to find thumbnail entries and orientation
+    var thumbnailEntries: [ThumbnailEntry] = []
+    var orientation: UInt16 = 1 // Default to normal orientation
+    parseExifForThumbnailsAndOrientation(exifData, exifOffset: exifOffset, thumbnails: &thumbnailEntries, orientation: &orientation)
 
     // Step 3: Look for MPF data in APP2 segments
     let mpfEntries = try await extractMPFThumbnails(from: reader)
@@ -91,12 +93,15 @@ func readJpegThumbnail(
     // Step 6: Get thumbnail dimensions
     let (width, height) = getThumbnailDimensions(thumbnailData)
 
+    // Step 7: Convert EXIF orientation to rotation degrees
+    let rotation = orientationToRotation(orientation)
+
     return Thumbnail(
         data: thumbnailData,
         format: .jpeg,
         width: width,
         height: height,
-        rotation: 0
+        rotation: rotation
     )
 }
 
@@ -137,26 +142,22 @@ private func extractExifData(from reader: Reader) async throws -> (Data, UInt32)
 
 // MARK: - EXIF Parsing
 
-private func parseExifForThumbnails(_ exifData: Data, exifOffset: UInt32) -> [ThumbnailEntry] {
-    guard exifData.count >= 8 else { return [] }
+private func parseExifForThumbnailsAndOrientation(_ exifData: Data, exifOffset: UInt32, thumbnails: inout [ThumbnailEntry], orientation: inout UInt16) {
+    guard exifData.count >= 8 else { return }
 
     // Parse TIFF header
     guard let header = parseExifHeader(exifData) else {
         logger.error("Failed to parse EXIF header")
-        return []
+        return
     }
-
-    var thumbnails: [ThumbnailEntry] = []
 
     // Parse IFD0 (main image)
-    if let ifd0Offset = parseIFD(exifData, offset: Int(header.ifdOffset), byteOrder: header.byteOrder, exifOffset: exifOffset, thumbnails: &thumbnails) {
+    if let ifd0Offset = parseIFD(exifData, offset: Int(header.ifdOffset), byteOrder: header.byteOrder, exifOffset: exifOffset, thumbnails: &thumbnails, orientation: &orientation) {
         // Look for IFD1 (thumbnail)
         if ifd0Offset > 0 {
-            _ = parseIFD(exifData, offset: ifd0Offset, byteOrder: header.byteOrder, exifOffset: exifOffset, isThumbnail: true, thumbnails: &thumbnails)
+            _ = parseIFD(exifData, offset: ifd0Offset, byteOrder: header.byteOrder, exifOffset: exifOffset, isThumbnail: true, thumbnails: &thumbnails, orientation: &orientation)
         }
     }
-
-    return thumbnails
 }
 
 private func parseExifHeader(_ data: Data) -> ExifHeader? {
@@ -182,7 +183,7 @@ private func parseExifHeader(_ data: Data) -> ExifHeader? {
     return ExifHeader(byteOrder: byteOrder, ifdOffset: ifdOffset)
 }
 
-private func parseIFD(_ data: Data, offset: Int, byteOrder: ByteOrder, exifOffset: UInt32, isThumbnail: Bool = false, thumbnails: inout [ThumbnailEntry]) -> Int? {
+private func parseIFD(_ data: Data, offset: Int, byteOrder: ByteOrder, exifOffset: UInt32, isThumbnail: Bool = false, thumbnails: inout [ThumbnailEntry], orientation: inout UInt16) -> Int? {
     guard offset + 2 <= data.count else { return nil }
 
     let entryCount = readUInt16(data, offset: offset, byteOrder: byteOrder)
@@ -200,9 +201,26 @@ private func parseIFD(_ data: Data, offset: Int, byteOrder: ByteOrder, exifOffse
         guard currentOffset + 12 <= data.count else { break }
 
         let tag = readUInt16(data, offset: currentOffset, byteOrder: byteOrder)
-        _ = readUInt16(data, offset: currentOffset + 2, byteOrder: byteOrder) // type - not used
-        _ = readUInt32(data, offset: currentOffset + 4, byteOrder: byteOrder) // count - not used
+        let type = readUInt16(data, offset: currentOffset + 2, byteOrder: byteOrder)
+        let count = readUInt32(data, offset: currentOffset + 4, byteOrder: byteOrder)
         let valueOffset = readUInt32(data, offset: currentOffset + 8, byteOrder: byteOrder)
+
+        // Parse Orientation tag (0x0112) in main IFD (IFD0)
+        if !isThumbnail, tag == 0x0112 {
+            // For Orientation tag (type 3 = SHORT), the value is stored directly in the valueOffset field
+            // But we need to handle byte order correctly
+            if type == 3, count == 1 {
+                // For SHORT type, the value is stored in the first 16 bits of valueOffset
+                // considering the byte order
+                switch byteOrder {
+                case .littleEndian:
+                    orientation = UInt16(valueOffset & 0xFFFF)
+                case .bigEndian:
+                    orientation = UInt16((valueOffset >> 16) & 0xFFFF)
+                }
+                logger.debug("Found Orientation: \(orientation)")
+            }
+        }
 
         if isThumbnail {
             switch tag {
@@ -245,6 +263,7 @@ private func parseIFD(_ data: Data, offset: Int, byteOrder: ByteOrder, exifOffse
     // Read next IFD offset
     guard currentOffset + 4 <= data.count else { return nil }
     let nextIFDOffset = readUInt32(data, offset: currentOffset, byteOrder: byteOrder)
+
     return nextIFDOffset > 0 ? Int(nextIFDOffset) : nil
 }
 
@@ -484,6 +503,20 @@ private func parseMPEntries(_ data: Data, entryOffset: Int, numberOfImages: Int,
 }
 
 // MARK: - Utility Functions
+
+private func orientationToRotation(_ orientation: UInt16) -> Int {
+    switch orientation {
+    case 1: return 0 // Normal
+    case 2: return 0 // Mirror horizontal (no rotation, just flip)
+    case 3: return 180 // Rotate 180°
+    case 4: return 180 // Mirror vertical (180° + flip)
+    case 5: return 270 // Mirror horizontal and rotate 270° CW
+    case 6: return 90 // Rotate 90° CW
+    case 7: return 90 // Mirror horizontal and rotate 90° CW
+    case 8: return 270 // Rotate 270° CW
+    default: return 0 // Unknown orientation, default to normal
+    }
+}
 
 private func readUInt16(_ data: Data, offset: Int, byteOrder: ByteOrder) -> UInt16 {
     guard offset + 2 <= data.count else { return 0 }
