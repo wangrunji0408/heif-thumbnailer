@@ -12,6 +12,85 @@ import UniformTypeIdentifiers
 
 private let logger = Logger(label: "com.hdremote.JpegThumbnailer")
 
+// MARK: - JpegReader Implementation
+
+public class JpegReader: ImageReader {
+    private let readAt: (UInt64, UInt32) async throws -> Data
+    private var thumbnailEntries: [ThumbnailEntry]?
+    private var metadata: Metadata?
+
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        self.readAt = readAt
+    }
+
+    public func getThumbnailList() async throws -> [ThumbnailInfo] {
+        if thumbnailEntries == nil {
+            try await loadThumbnailEntries()
+        }
+
+        return thumbnailEntries?.map { entry in
+            ThumbnailInfo(
+                size: entry.length,
+                format: "jpeg",
+                width: entry.width,
+                height: entry.height,
+                rotation: nil
+            )
+        } ?? []
+    }
+
+    public func getThumbnail(at index: Int) async throws -> Data {
+        if thumbnailEntries == nil {
+            try await loadThumbnailEntries()
+        }
+
+        guard let entries = thumbnailEntries, index < entries.count else {
+            throw ImageReaderError.indexOutOfBounds
+        }
+
+        let entry = entries[index]
+        return try await readAt(UInt64(entry.offset), entry.length)
+    }
+
+    public func getMetadata() async throws -> Metadata? {
+        if metadata == nil {
+            try await loadMetadata()
+        }
+        return metadata
+    }
+
+    private func loadThumbnailEntries() async throws {
+        let reader = Reader(readAt: readAt)
+
+        // Read JPEG header and find EXIF data
+        try await reader.prefetch(offset: 0, length: 16384)
+        guard let (exifData, exifOffset) = try await extractExifData(from: reader) else {
+            throw ImageReaderError.invalidData
+        }
+
+        // Parse EXIF data to find thumbnail entries
+        var entries: [ThumbnailEntry] = []
+        var orientation: UInt16 = 1
+        parseExifForThumbnailsAndOrientation(exifData, exifOffset: exifOffset, thumbnails: &entries, orientation: &orientation)
+
+        // Look for MPF data
+        let mpfEntries = try await extractMPFThumbnails(from: reader)
+        entries.append(contentsOf: mpfEntries)
+
+        thumbnailEntries = entries
+    }
+
+    private func loadMetadata() async throws {
+        // For JPEG files, we can get metadata from the main image
+        // This is a simplified implementation - in practice, you'd parse the JPEG header
+        if let entries = thumbnailEntries, let firstEntry = entries.first,
+           let width = firstEntry.width, let height = firstEntry.height
+        {
+            metadata = Metadata(width: width, height: height)
+        }
+    }
+}
+
 // MARK: - Internal Types
 
 private struct ThumbnailEntry {
@@ -50,75 +129,6 @@ private struct ExifHeader {
 private enum ByteOrder {
     case bigEndian
     case littleEndian
-}
-
-// MARK: - Public API
-
-/// Extract thumbnail from JPEG file with minimal read operations
-/// - Parameters:
-///   - readAt: Async function to read data at specific offset and length
-///   - minShortSide: Minimum short side length in pixels. Returns the most suitable thumbnail.
-/// - Returns: Thumbnail data with metadata, or nil if extraction fails
-func readJpegThumbnail(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data,
-    minShortSide: UInt32? = nil
-) async throws -> Thumbnail? {
-    let reader = Reader(readAt: readAt)
-
-    // Step 1: Read JPEG header and find EXIF data and MPF data
-    try await reader.prefetch(offset: 0, length: 16384)
-    guard let (exifData, exifOffset) = try await extractExifData(from: reader) else {
-        logger.error("No EXIF data found in JPEG file")
-        return nil
-    }
-
-    logger.debug("Found EXIF data at offset \(exifOffset), size: \(exifData.count) bytes")
-
-    // Step 2: Parse EXIF data to find thumbnail entries and orientation
-    var thumbnailEntries: [ThumbnailEntry] = []
-    var orientation: UInt16 = 1 // Default to normal orientation
-    parseExifForThumbnailsAndOrientation(exifData, exifOffset: exifOffset, thumbnails: &thumbnailEntries, orientation: &orientation)
-
-    // Step 3: Look for MPF data in APP2 segments
-    let mpfEntries = try await extractMPFThumbnails(from: reader)
-    thumbnailEntries.append(contentsOf: mpfEntries)
-
-    guard !thumbnailEntries.isEmpty else {
-        logger.error("No thumbnails found in EXIF or MPF data")
-        return nil
-    }
-
-    logger.debug("Found \(thumbnailEntries.count) total thumbnail entries")
-
-    // Step 4: Find suitable thumbnail based on requirements
-    thumbnailEntries.sort { $0.inferedShortSide < $1.inferedShortSide }
-    guard let selectedEntry = thumbnailEntries.first(where: { $0.inferedShortSide >= minShortSide ?? 0 }) else {
-        logger.error("No thumbnail found with short side >= \(minShortSide ?? 0)")
-        return nil
-    }
-
-    // Step 5: Read thumbnail data
-    var thumbnailData = try await reader.readAt(offset: UInt64(selectedEntry.offset), length: selectedEntry.length)
-
-    // Step 6: Get thumbnail dimensions
-    let (width, height) = getThumbnailDimensions(thumbnailData)
-
-    // Step 7: Convert EXIF orientation to rotation degrees
-    let (rotation, flip) = orientationToRotation(orientation)
-
-    // Step 8: Apply orientation correction if requested
-    if rotation != 0 || flip {
-        logger.debug("Applying orientation correction: \(rotation) degrees, flip: \(flip)")
-        thumbnailData = applyOrientationCorrection(to: thumbnailData, rotation: rotation, flip: flip) ?? thumbnailData
-    }
-
-    return Thumbnail(
-        data: thumbnailData,
-        format: .jpeg,
-        width: width,
-        height: height,
-        rotation: rotation
-    )
 }
 
 /// Apply orientation correction to thumbnail data and return corrected Data

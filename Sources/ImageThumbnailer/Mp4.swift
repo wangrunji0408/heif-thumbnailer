@@ -3,72 +3,88 @@ import Logging
 
 private let logger = Logger(label: "com.hdremote.Mp4Thumbnailer")
 
+// MARK: - Mp4Reader Implementation
+
+public class Mp4Reader: ImageReader {
+    private let readAt: (UInt64, UInt32) async throws -> Data
+    private var imageInfos: [Mp4ImageInfo]?
+    private var metadata: Metadata?
+
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        self.readAt = readAt
+    }
+
+    public func getThumbnailList() async throws -> [ThumbnailInfo] {
+        if imageInfos == nil {
+            try await loadImageInfos()
+        }
+
+        return imageInfos?.map { info in
+            ThumbnailInfo(
+                size: UInt32(info.data.count),
+                format: "jpeg",
+                width: info.width,
+                height: info.height,
+                rotation: nil
+            )
+        } ?? []
+    }
+
+    public func getThumbnail(at index: Int) async throws -> Data {
+        if imageInfos == nil {
+            try await loadImageInfos()
+        }
+
+        guard let infos = imageInfos, index < infos.count else {
+            throw ImageReaderError.indexOutOfBounds
+        }
+
+        return infos[index].data
+    }
+
+    public func getMetadata() async throws -> Metadata? {
+        if metadata == nil {
+            try await loadMetadata()
+        }
+        return metadata
+    }
+
+    private func loadImageInfos() async throws {
+        // Read file header
+        let headerData = try await readAt(0, 1024)
+
+        // Validate MP4 format
+        guard validateMp4Format(data: headerData) else {
+            throw ImageReaderError.invalidData
+        }
+
+        // Find moov box
+        guard let (moovOffset, moovSize) = try await findMoovBoxInHeader(headerData: headerData, readAt: readAt) else {
+            throw ImageReaderError.invalidData
+        }
+
+        let moovData = try await readAt(moovOffset + 8, moovSize - 8)
+
+        // Parse moov box to find thumbnails
+        imageInfos = parseMoovBox(data: moovData)
+    }
+
+    private func loadMetadata() async throws {
+        // For MP4 files, we can get metadata from the first thumbnail
+        if let infos = imageInfos, let firstInfo = infos.first,
+           let width = firstInfo.width, let height = firstInfo.height
+        {
+            metadata = Metadata(width: width, height: height)
+        }
+    }
+}
+
 // MARK: - MP4 Data Structures
 
 private struct Mp4ImageInfo {
     let data: Data
     let width: UInt32?
     let height: UInt32?
-}
-
-// MARK: - Public API
-
-/// 从MP4文件中读取缩略图
-/// - Parameters:
-///   - readAt: 异步读取数据的函数
-///   - minShortSide: 最小短边长度，如果为nil则返回第一个可用的缩略图
-/// - Returns: 缩略图数据和元数据，如果提取失败则返回nil
-func readMp4Thumbnail(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data,
-    minShortSide: UInt32? = nil
-) async throws -> Thumbnail? {
-    // Step 1: 读取文件头部
-    let headerData = try await readAt(0, 1024)
-
-    logger.debug("Read header: \(headerData.count) bytes")
-
-    // 验证这是一个有效的MP4文件
-    guard validateMp4Format(data: headerData) else {
-        logger.debug("Invalid MP4 format")
-        return nil
-    }
-
-    // 查找moov box
-    guard let (moovOffset, moovSize) = try await findMoovBoxInHeader(headerData: headerData, readAt: readAt) else {
-        logger.debug("moov box not found in header")
-        return nil
-    }
-
-    logger.debug("Found moov box at offset: \(moovOffset), size: \(moovSize)")
-
-    let moovData = try await readAt(moovOffset + 8, moovSize - 8)
-    logger.debug("Read additional moov data: \(moovData.count) bytes")
-
-    // 解析moov box，查找缩略图
-    let imageInfos = parseMoovBox(data: moovData)
-
-    guard !imageInfos.isEmpty else {
-        logger.debug("No thumbnail images found in MP4")
-        return nil
-    }
-
-    logger.debug("Found \(imageInfos.count) image(s)")
-
-    // 选择最佳的缩略图
-    guard let selectedImage = selectBestThumbnail(imageInfos, minShortSide: minShortSide) else {
-        logger.debug("No suitable thumbnail found")
-        return nil
-    }
-
-    logger.debug("Selected thumbnail: \(selectedImage.width ?? 0)x\(selectedImage.height ?? 0)")
-
-    return Thumbnail(
-        data: selectedImage.data,
-        format: .jpeg,
-        width: selectedImage.width,
-        height: selectedImage.height,
-        rotation: 0
-    )
 }
 
 // MARK: - Private Implementation
@@ -263,29 +279,7 @@ private func extractImageFromItem(data: Data) -> Mp4ImageInfo? {
     return nil
 }
 
-private func searchForThumbnailInItem(data: Data) -> Mp4ImageInfo? {
-    // 搜索包含JPEG标记的数据
-    guard let jpegStart = findJpegMarker(in: data) else { return nil }
-
-    let imageData = data.subdata(in: jpegStart ..< data.count)
-    guard isJpegData(imageData) else { return nil }
-
-    let (width, height) = extractJpegDimensions(data: imageData)
-
-    return Mp4ImageInfo(data: imageData, width: width, height: height)
-}
-
 // MARK: - Utility Functions
-
-private func findJpegMarker(in data: Data) -> Int? {
-    // 查找JPEG文件头 (FF D8)
-    for i in 0 ..< (data.count - 1) {
-        if data[i] == 0xFF, data[i + 1] == 0xD8 {
-            return i
-        }
-    }
-    return nil
-}
 
 private func isJpegData(_ data: Data) -> Bool {
     return data.count >= 2 && data[0] == 0xFF && data[1] == 0xD8
@@ -326,27 +320,4 @@ private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt3
     }
 
     return (nil, nil)
-}
-
-private func selectBestThumbnail(_ imageInfos: [Mp4ImageInfo], minShortSide: UInt32?) -> Mp4ImageInfo? {
-    guard !imageInfos.isEmpty else { return nil }
-
-    let sortedImages = imageInfos.sorted {
-        let firstShortSide = min($0.width ?? 0, $0.height ?? 0)
-        let secondShortSide = min($1.width ?? 0, $1.height ?? 0)
-        return firstShortSide < secondShortSide
-    }
-
-    if let minShortSide = minShortSide {
-        // 找到满足最小尺寸要求的第一个图像
-        if let suitable = sortedImages.first(where: { image in
-            let shortSide = min(image.width ?? 0, image.height ?? 0)
-            return shortSide >= minShortSide
-        }) {
-            return suitable
-        }
-    }
-
-    // 如果没有找到满足要求的，返回最佳的可用图像
-    return sortedImages.last
 }

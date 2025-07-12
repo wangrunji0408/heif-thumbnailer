@@ -5,16 +5,92 @@ import Logging
 
 private let logger = Logger(label: "com.hdremote.HeifThumbnailer")
 
-// MARK: - Public Types
+// MARK: - HeifReader Implementation
+
+public class HeifReader: ImageReader {
+    private let readAt: (UInt64, UInt32) async throws -> Data
+    private var thumbnailInfos: [HeifThumbnailEntry]?
+    private var metadata: Metadata?
+
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        self.readAt = readAt
+    }
+
+    public func getThumbnailList() async throws -> [ThumbnailInfo] {
+        if thumbnailInfos == nil {
+            try await loadThumbnailInfos()
+        }
+
+        return thumbnailInfos?.map { info in
+            ThumbnailInfo(
+                size: info.size,
+                format: info.type == "hvc1" ? "heic" : "jpeg",
+                width: info.width,
+                height: info.height,
+                rotation: info.rotation
+            )
+        } ?? []
+    }
+
+    public func getThumbnail(at index: Int) async throws -> Data {
+        if thumbnailInfos == nil {
+            try await loadThumbnailInfos()
+        }
+
+        guard let infos = thumbnailInfos, index < infos.count else {
+            throw ImageReaderError.indexOutOfBounds
+        }
+
+        let info = infos[index]
+        let data = try await readAt(UInt64(info.offset), info.size)
+        return try await createThumbnail(from: info, data: data)
+    }
+
+    public func getMetadata() async throws -> Metadata? {
+        if metadata == nil {
+            try await loadMetadata()
+        }
+        return metadata
+    }
+
+    private func loadThumbnailInfos() async throws {
+        guard let metaData = try await readMetaBox(readAt: readAt) else {
+            throw ImageReaderError.metaBoxNotFound
+        }
+
+        thumbnailInfos = parseMetaBox(data: metaData)
+    }
+
+    private func loadMetadata() async throws {
+        // For HEIF files, we can try to get metadata from the primary image
+        // This is a simplified implementation
+        guard let metaData = try await readMetaBox(readAt: readAt) else {
+            return
+        }
+
+        let infos = parseMetaBox(data: metaData)
+        if let firstInfo = infos.first {
+            metadata = Metadata(width: firstInfo.width ?? 0, height: firstInfo.height ?? 0)
+        }
+    }
+}
+
+public enum ImageReaderError: Error {
+    case metaBoxNotFound
+    case indexOutOfBounds
+    case invalidData
+    case unsupportedFormat
+}
 
 // MARK: - Internal Types
 
-struct ThumbnailInfo {
+struct HeifThumbnailEntry {
     let itemId: UInt32
     let offset: UInt32
     let size: UInt32
     let rotation: Int?
-    let imageSize: ImageSize?
+    let width: UInt32?
+    let height: UInt32?
     let type: String
     let properties: [ItemProperty]
 }
@@ -23,7 +99,8 @@ struct ItemProperty {
     let propertyIndex: UInt32
     let propertyType: String
     let rotation: Int?
-    let imageSize: ImageSize?
+    let width: UInt32?
+    let height: UInt32?
     let rawData: Data
 }
 
@@ -42,55 +119,6 @@ private struct ItemLocation {
 private struct ItemPropertyAssociation {
     let itemId: UInt32
     let propertyIndices: [UInt32]
-}
-
-// MARK: - Public API
-
-/// Efficiently read thumbnail from a HEIC file with minimal read operations
-/// - Parameters:
-///   - readAt: Async function to read data at specific offset and length
-///   - minShortSide: Minimum short side length in pixels. Returns the smallest thumbnail that meets this requirement. If nil, returns the first available thumbnail.
-/// - Returns: Thumbnail data with metadata, or nil if extraction fails
-func readHeifThumbnail(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data,
-    minShortSide: UInt32? = nil
-) async throws -> Thumbnail? {
-    // Step 1: Validate HEIC format and get meta data
-    guard let metaData = try await readMetaBox(readAt: readAt) else {
-        logger.error("Meta box not found")
-        return nil
-    }
-
-    // Step 2: Parse meta box
-    let thumbnailInfos = parseMetaBox(data: metaData)
-
-    guard !thumbnailInfos.isEmpty else {
-        logger.error("No thumbnails found in meta box")
-        return nil
-    }
-
-    // Step 3: Find suitable thumbnail
-    guard let thumbnailInfo = findSuitableThumbnail(thumbnailInfos, minShortSide: minShortSide)
-    else {
-        logger.error("No thumbnail meets the minShortSide requirement")
-        return nil
-    }
-
-    // Step 4: Read and process thumbnail data
-    let thumbnailData = try await readAt(UInt64(thumbnailInfo.offset), thumbnailInfo.size)
-    return try await createThumbnail(from: thumbnailInfo, data: thumbnailData)
-}
-
-/// Convenience function to extract thumbnail as platform image
-public func readHeifThumbnailAsImage(
-    readAt: @escaping (UInt64, UInt32) async throws -> Data,
-    minShortSide: UInt32? = nil
-) async throws -> PlatformImage? {
-    guard let thumbnail = try await readHeifThumbnail(readAt: readAt, minShortSide: minShortSide)
-    else {
-        return nil
-    }
-    return createImageFromThumbnailData(thumbnail.data, rotation: thumbnail.rotation)
 }
 
 // MARK: - HEIC Format Validation
@@ -151,7 +179,7 @@ private func readMetaBox(readAt: @escaping (UInt64, UInt32) async throws -> Data
 
 // MARK: - Meta Box Parsing
 
-private func parseMetaBox(data: Data) -> [ThumbnailInfo] {
+private func parseMetaBox(data: Data) -> [HeifThumbnailEntry] {
     var offset: UInt64 = 12 // Skip meta box header + version/flags
 
     var items: [ItemInfo] = []
@@ -217,8 +245,8 @@ private func buildThumbnailInfos(
     thumbnailReferences: [(from: UInt32, to: [UInt32])],
     properties: [ItemProperty],
     propertyAssociations: [ItemPropertyAssociation]
-) -> [ThumbnailInfo] {
-    var thumbnailCandidates: [ThumbnailInfo] = []
+) -> [HeifThumbnailEntry] {
+    var thumbnailCandidates: [HeifThumbnailEntry] = []
 
     for (thumbnailId, masterIds) in thumbnailReferences {
         guard masterIds.contains(primaryItemId),
@@ -228,45 +256,44 @@ private func buildThumbnailInfos(
             continue
         }
 
-        let (rotation, imageSize, associatedProperties) = extractItemProperties(
+        let (rotation, width, height, associatedProperties) = extractItemProperties(
             itemId: thumbnailId,
             properties: properties,
             propertyAssociations: propertyAssociations
         )
 
-        let thumbnail = ThumbnailInfo(
+        let thumbnail = HeifThumbnailEntry(
             itemId: thumbnailId,
             offset: location.offset,
             size: location.length,
             rotation: rotation,
-            imageSize: imageSize,
+            width: width ?? 0,
+            height: height ?? 0,
             type: item.itemType,
             properties: associatedProperties
         )
 
         thumbnailCandidates.append(thumbnail)
         logger.debug(
-            "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), size=\(imageSize?.width ?? 0)x\(imageSize?.height ?? 0)"
+            "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), size=\(width ?? 0)x\(height ?? 0)"
         )
     }
 
-    // Sort by size (smallest first)
-    return thumbnailCandidates.sorted {
-        ($0.imageSize?.shortSide ?? UInt32.max) < ($1.imageSize?.shortSide ?? UInt32.max)
-    }
+    return thumbnailCandidates
 }
 
 private func extractItemProperties(
     itemId: UInt32,
     properties: [ItemProperty],
     propertyAssociations: [ItemPropertyAssociation]
-) -> (rotation: Int?, imageSize: ImageSize?, properties: [ItemProperty]) {
+) -> (rotation: Int?, width: UInt32?, height: UInt32?, properties: [ItemProperty]) {
     guard let association = propertyAssociations.first(where: { $0.itemId == itemId }) else {
-        return (nil, nil, [])
+        return (nil, nil, nil, [])
     }
 
     var rotation: Int?
-    var imageSize: ImageSize?
+    var width: UInt32?
+    var height: UInt32?
     var associatedProperties: [ItemProperty] = []
 
     for propertyIndex in association.propertyIndices {
@@ -280,13 +307,14 @@ private func extractItemProperties(
         case "irot":
             rotation = property.rotation
         case "ispe":
-            imageSize = property.imageSize
+            width = property.width
+            height = property.height
         default:
             break
         }
     }
 
-    return (rotation, imageSize, associatedProperties)
+    return (rotation, width, height, associatedProperties)
 }
 
 // MARK: - Box Parsing Utilities
@@ -605,13 +633,14 @@ private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
             in: Int(localOffset) ..< min(Int(savedOffset + Int(boxSize)), data.count))
 
         let rotation = (boxType == "irot") ? parseIrotBox(data: boxData) : nil
-        let imageSize = (boxType == "ispe") ? parseIspeBox(data: boxData) : nil
+        let size = (boxType == "ispe") ? parseIspeBox(data: boxData) : nil
 
         let property = ItemProperty(
             propertyIndex: propertyIndex,
             propertyType: boxType,
             rotation: rotation,
-            imageSize: imageSize,
+            width: size?.width,
+            height: size?.height,
             rawData: boxData
         )
         properties.append(property)
@@ -628,7 +657,7 @@ private func parseIrotBox(data: Data) -> Int? {
     return Int(data[0] & 0x03) * 90
 }
 
-private func parseIspeBox(data: Data) -> ImageSize? {
+private func parseIspeBox(data: Data) -> (width: UInt32, height: UInt32)? {
     guard data.count >= 12 else { return nil }
 
     let width = data.subdata(in: 4 ..< 8)
@@ -636,7 +665,7 @@ private func parseIspeBox(data: Data) -> ImageSize? {
     let height = data.subdata(in: 8 ..< 12)
         .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
 
-    return ImageSize(width: width, height: height)
+    return (width: width, height: height)
 }
 
 private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociation] {
@@ -674,41 +703,22 @@ private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociatio
     return associations
 }
 
-// MARK: - Thumbnail Processing
-
-private func findSuitableThumbnail(_ thumbnails: [ThumbnailInfo], minShortSide: UInt32?)
-    -> ThumbnailInfo?
-{
-    guard let minShortSide else { return thumbnails.first }
-
-    return thumbnails.first { thumbnail in
-        guard let imageSize = thumbnail.imageSize else { return true }
-        return imageSize.shortSide >= minShortSide
-    }
-}
-
-private func createThumbnail(from info: ThumbnailInfo, data: Data) async throws -> Thumbnail? {
-    let rotation = info.rotation ?? 0
-    let width = info.imageSize?.width ?? 0
-    let height = info.imageSize?.height ?? 0
-
+private func createThumbnail(from info: HeifThumbnailEntry, data: Data) async throws -> Data {
     switch info.type {
     case "jpeg":
         logger.debug("Processing JPEG thumbnail")
-        return Thumbnail(data: data, format: .jpeg, width: width, height: height, rotation: rotation)
+        return data
 
     case "hvc1":
         logger.debug("Processing HEVC thumbnail")
         guard let heicData = try await createHEICFromHEVC(info, hevcData: data) else {
             logger.error("Failed to create HEIC from HEVC")
-            return nil
+            throw ImageReaderError.invalidData
         }
-        return Thumbnail(
-            data: heicData, format: .heic, width: width, height: height, rotation: rotation
-        )
+        return heicData
 
     default:
         logger.error("Unsupported thumbnail type: \(info.type)")
-        return nil
+        throw ImageReaderError.unsupportedFormat
     }
 }

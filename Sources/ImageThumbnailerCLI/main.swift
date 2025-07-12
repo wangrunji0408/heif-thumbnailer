@@ -62,37 +62,37 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             // Determine file type and extract thumbnail accordingly
             let fileExtension = fileURL.pathExtension.lowercased()
 
-            let fileType: FileFormat
+            let reader: ImageReader
             switch fileExtension {
             case "heic", "heif", "hif":
-                fileType = .heic
+                reader = HeifReader(readAt: readAt)
             case "jpg", "jpeg":
-                fileType = .jpeg
+                reader = JpegReader(readAt: readAt)
             case "arw":
-                fileType = .arw
+                reader = SonyArwReader(readAt: readAt)
             case "mp4":
-                fileType = .mp4
+                reader = Mp4Reader(readAt: readAt)
             default:
-                logger.error("unsupported file format: \(fileExtension). Only HEIC, HEIF, JPG, JPEG, ARW, and MP4 are supported.")
+                logger.error("unsupported file format: \(fileExtension). Only HEIF, JPEG, ARW, and MP4 are supported.")
                 return
             }
 
-            // Extract thumbnail
-            if let thumbnail = try await readThumbnail(
-                readAt: readAt, type: fileType, minShortSide: shortSideLength
-            ) {
-                logger.info(
-                    "success to extract thumbnail, size: \(thumbnail.data.count) bytes, format: \(thumbnail.format), rotation: \(thumbnail.rotation), image size: \(thumbnail.width ?? 0)x\(thumbnail.height ?? 0)"
-                )
-
-                // save thumbnail data
-                let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(thumbnail.format)")
-                try thumbnail.data.write(to: outputURL)
-                logger.info("thumbnail saved to: \(outputURL.path)")
-            } else {
-                logger.error("fail to extract HEIC thumbnail from file")
+            let thumbnailList = try await reader.getThumbnailList()
+            if thumbnailList.isEmpty {
+                logger.error("no thumbnail found in file")
+                return
             }
+            var indices = Array(0 ..< thumbnailList.count)
+            indices.sort { thumbnailList[$0].width ?? 0 < thumbnailList[$1].width ?? 0 }
+            let index = indices.first(where: { thumbnailList[$0].width ?? 0 >= shortSideLength ?? 0 }) ?? 0
+            let info = thumbnailList[index]
+            let thumbnail = try await reader.getThumbnail(at: index)
+            logger.info("thumbnail index: \(index), format: \(info.format), size: \(info.size) bytes, width: \(info.width ?? 0), height: \(info.height ?? 0), rotation: \(info.rotation ?? 0)")
 
+            // save thumbnail data
+            let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(info.format)")
+            try thumbnail.write(to: outputURL)
+            logger.info("thumbnail saved to: \(outputURL.path)")
         } catch {
             logger.error("\(error.localizedDescription)")
         }

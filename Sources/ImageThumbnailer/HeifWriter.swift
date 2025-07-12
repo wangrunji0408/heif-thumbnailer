@@ -5,7 +5,7 @@ class HEICWriter {
     private var buffer = Data()
 
     /// Create a complete HEIC file from HEVC data
-    func createHEICFromHEVC(_ thumbnail: ThumbnailInfo, hevcData: Data) -> Data {
+    func createHEICFromHEVC(_ thumbnail: HeifThumbnailEntry, hevcData: Data) -> Data {
         buffer.removeAll()
 
         // Build HEIC structure
@@ -35,7 +35,7 @@ class HEICWriter {
         updateBoxSize(at: startPosition)
     }
 
-    private func writeMetaBox(for thumbnail: ThumbnailInfo) -> Int {
+    private func writeMetaBox(for thumbnail: HeifThumbnailEntry) -> Int {
         let startPosition = buffer.count
         writeUInt32(0) // Size placeholder
         writeString("meta")
@@ -74,7 +74,7 @@ class HEICWriter {
         updateBoxSize(at: startPosition)
     }
 
-    private func writeIinfBox(for thumbnail: ThumbnailInfo) {
+    private func writeIinfBox(for thumbnail: HeifThumbnailEntry) {
         let startPosition = buffer.count
         writeUInt32(0) // Size placeholder
         writeString("iinf")
@@ -98,7 +98,7 @@ class HEICWriter {
         updateBoxSize(at: startPosition)
     }
 
-    private func writeIprpBox(for thumbnail: ThumbnailInfo) {
+    private func writeIprpBox(for thumbnail: HeifThumbnailEntry) {
         let startPosition = buffer.count
         writeUInt32(0) // Size placeholder
         writeString("iprp")
@@ -107,7 +107,7 @@ class HEICWriter {
         updateBoxSize(at: startPosition)
     }
 
-    private func writeIpcoBox(for thumbnail: ThumbnailInfo) {
+    private func writeIpcoBox(for thumbnail: HeifThumbnailEntry) {
         let startPosition = buffer.count
         writeUInt32(0) // Size placeholder
         writeString("ipco")
@@ -128,7 +128,7 @@ class HEICWriter {
         updateBoxSize(at: startPosition)
     }
 
-    private func writeIpmaBox(for thumbnail: ThumbnailInfo) {
+    private func writeIpmaBox(for thumbnail: HeifThumbnailEntry) {
         let startPosition = buffer.count
         writeUInt32(0) // Size placeholder
         writeString("ipma")
@@ -221,7 +221,7 @@ class HEICWriter {
 }
 
 /// Wrap HEVC data as a complete HEIC file
-func createHEICFromHEVC(_ thumbnail: ThumbnailInfo, hevcData: Data) async throws -> Data? {
+func createHEICFromHEVC(_ thumbnail: HeifThumbnailEntry, hevcData: Data) async throws -> Data? {
     let writer = HEICWriter()
     return writer.createHEICFromHEVC(thumbnail, hevcData: hevcData)
 }
