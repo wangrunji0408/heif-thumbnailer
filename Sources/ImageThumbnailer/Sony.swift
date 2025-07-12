@@ -42,7 +42,7 @@ public class SonyArwReader: ImageReader {
         }
 
         let entry = entries[index]
-        return try await reader.readAt(offset: UInt64(entry.offset), length: entry.length)
+        return try await reader.read(at: UInt64(entry.offset), length: entry.length)
     }
 
     public func getMetadata() async throws -> Metadata {
@@ -57,7 +57,7 @@ public class SonyArwReader: ImageReader {
 
     private func loadMetadata() async throws {
         // Read TIFF header and validate ARW format
-        try await reader.prefetch(offset: 0, length: 4096)
+        try await reader.prefetch(at: 0, length: 4096)
         let ifdOffset = try await parseTiffHeader()
 
         // Parse IFDs to find thumbnail entries and main image dimensions
@@ -96,8 +96,8 @@ public class SonyArwReader: ImageReader {
         mainHeight: inout UInt32,
         ifdIndex: Int
     ) async throws -> UInt32 {
-        try await reader.prefetch(offset: UInt64(ifdOffset), length: 256)
-        let entryCount = try await reader.readUInt16(offset: UInt64(ifdOffset))
+        try await reader.prefetch(at: UInt64(ifdOffset), length: 256)
+        let entryCount = try await reader.readUInt16(at: UInt64(ifdOffset))
 
         var thumbnailOffset: UInt32?
         var thumbnailLength: UInt32?
@@ -107,13 +107,13 @@ public class SonyArwReader: ImageReader {
         for i in 0 ..< entryCount {
             let entryOffset = UInt64(ifdOffset) + 2 + UInt64(i) * 12
 
-            let tag = try await reader.readUInt16(offset: entryOffset)
-            let type = try await reader.readUInt16(offset: entryOffset + 2)
+            let tag = try await reader.readUInt16(at: entryOffset)
+            let type = try await reader.readUInt16(at: entryOffset + 2)
             // let count = try await reader.readUInt32(offset: entryOffset + 4)
             let value = if type == 3 {
-                try UInt32(await reader.readUInt16(offset: entryOffset + 8))
+                try UInt32(await reader.readUInt16(at: entryOffset + 8))
             } else {
-                try await reader.readUInt32(offset: entryOffset + 8)
+                try await reader.readUInt32(at: entryOffset + 8)
             }
 
             switch tag {
@@ -173,15 +173,15 @@ public class SonyArwReader: ImageReader {
 
         // Read next IFD offset
         let nextIfdOffsetLocation = UInt64(ifdOffset) + 2 + UInt64(entryCount) * 12
-        let nextIfdOffset = try await reader.readUInt32(offset: nextIfdOffsetLocation)
+        let nextIfdOffset = try await reader.readUInt32(at: nextIfdOffsetLocation)
 
         return nextIfdOffset
     }
 
     private func parseSubIFDForDimensions(subIfdOffset: UInt64) async throws -> (width: UInt32, height: UInt32) {
         // Read SubIFD header
-        try await reader.prefetch(offset: subIfdOffset, length: 1024)
-        let entryCount = try await reader.readUInt16(offset: subIfdOffset)
+        try await reader.prefetch(at: subIfdOffset, length: 1024)
+        let entryCount = try await reader.readUInt16(at: subIfdOffset)
 
         var width: UInt32 = 0
         var height: UInt32 = 0
@@ -189,13 +189,13 @@ public class SonyArwReader: ImageReader {
         for i in 0 ..< Int(entryCount) {
             let entryOffset = subIfdOffset + 2 + UInt64(i) * 12
 
-            let tag = try await reader.readUInt16(offset: entryOffset)
-            let type = try await reader.readUInt16(offset: entryOffset + 2)
+            let tag = try await reader.readUInt16(at: entryOffset)
+            let type = try await reader.readUInt16(at: entryOffset + 2)
             // let count = try await reader.readUInt32(offset: entryOffset + 4)
             let value = if type == 3 {
-                try UInt32(await reader.readUInt16(offset: entryOffset + 8))
+                try UInt32(await reader.readUInt16(at: entryOffset + 8))
             } else {
-                try await reader.readUInt32(offset: entryOffset + 8)
+                try await reader.readUInt32(at: entryOffset + 8)
             }
 
             switch tag {
@@ -212,7 +212,7 @@ public class SonyArwReader: ImageReader {
     }
 
     private func parseTiffHeader() async throws -> UInt32 {
-        let data = try await reader.readAt(offset: 0, length: 2)
+        let data = try await reader.read(at: 0, length: 2)
         guard data.count >= 2 else { throw ImageReaderError.invalidData }
 
         if data[0] == 0x49, data[1] == 0x49 { // "II" - Intel (little endian)
@@ -224,11 +224,11 @@ public class SonyArwReader: ImageReader {
         }
 
         // Check magic number (42)
-        let magic = try await reader.readUInt16(offset: 2)
+        let magic = try await reader.readUInt16(at: 2)
         guard magic == 42 else { throw ImageReaderError.invalidData }
 
         // Get IFD offset
-        let ifdOffset = try await reader.readUInt32(offset: 4)
+        let ifdOffset = try await reader.readUInt32(at: 4)
 
         return ifdOffset
     }

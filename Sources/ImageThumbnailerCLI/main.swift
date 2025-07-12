@@ -18,6 +18,9 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "The length of the thumbnail's short side")
     var shortSideLength: UInt32?
 
+    @Option(name: .shortAndLong, help: "The index of the thumbnail to extract")
+    var thumbnailIndex: Int?
+
     @Option(name: .shortAndLong, help: "The output path for the thumbnail")
     var outputPath: String?
 
@@ -85,12 +88,24 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 logger.error("no thumbnail found in file")
                 return
             }
-            var indices = Array(0 ..< thumbnailList.count)
-            indices.sort { thumbnailList[$0].width ?? 0 < thumbnailList[$1].width ?? 0 }
-            let index = indices.first(where: { thumbnailList[$0].width ?? 0 >= shortSideLength ?? 0 }) ?? 0
+
+            // 显示所有找到的缩略图
+            logger.info("found \(thumbnailList.count) thumbnails:")
+            for (i, info) in thumbnailList.enumerated() {
+                logger.info("  [\(i)] format: \(info.format), size: \(info.size) bytes, dimensions: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)")
+            }
+
+            let index: Int
+            if let thumbnailIndex = thumbnailIndex {
+                index = thumbnailIndex
+            } else {
+                var indices = Array(0 ..< thumbnailList.count)
+                indices.sort { thumbnailList[$0].width ?? 0 < thumbnailList[$1].width ?? 0 }
+                index = indices.first(where: { thumbnailList[$0].width ?? 0 >= shortSideLength ?? 0 }) ?? 0
+            }
             let info = thumbnailList[index]
             let thumbnail = try await reader.getThumbnail(at: index)
-            logger.info("thumbnail index: \(index), format: \(info.format), size: \(info.size) bytes, size: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)")
+            logger.info("selected thumbnail index: \(index)")
 
             // save thumbnail data
             let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(info.format)")

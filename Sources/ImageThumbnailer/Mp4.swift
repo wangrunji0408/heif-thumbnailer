@@ -54,7 +54,7 @@ public class Mp4Reader: ImageReader {
 
     private func loadMetadata() async throws {
         // Read file header with prefetch for better performance
-        try await reader.prefetch(offset: 0, length: 2048)
+        try await reader.prefetch(at: 0, length: 2048)
 
         // Validate MP4 format
         guard try await validateMp4Format(reader: reader) else {
@@ -67,8 +67,8 @@ public class Mp4Reader: ImageReader {
         }
 
         // Prefetch moov box data for efficient parsing
-        try await reader.prefetch(offset: moovOffset + 8, length: moovSize - 8)
-        let moovData = try await reader.readAt(offset: moovOffset + 8, length: moovSize - 8)
+        try await reader.prefetch(at: moovOffset + 8, length: moovSize - 8)
+        let moovData = try await reader.read(at: moovOffset + 8, length: moovSize - 8)
 
         // Parse moov box to find thumbnails and track dimensions
         let (thumbnails, trackDimensions) = parseMoovBoxForBoth(data: moovData)
@@ -143,8 +143,8 @@ private struct Mp4ImageInfo {
 // MARK: - Private Implementation
 
 private func validateMp4Format(reader: Reader) async throws -> Bool {
-    let size = try await reader.readUInt32(offset: 0)
-    let type = try await reader.readString(offset: 4, length: 4)
+    let size = try await reader.readUInt32(at: 0)
+    let type = try await reader.readString(at: 4, length: 4)
     return size >= 8 && type == "ftyp"
 }
 
@@ -153,8 +153,8 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
 
     while offset < 100_000_000 { // Reasonable limit for moov box search
         // Ensure we have header data
-        let boxSize = try await reader.readUInt32(offset: offset)
-        let boxType = try await reader.readString(offset: offset + 4, length: 4)
+        let boxSize = try await reader.readUInt32(at: offset)
+        let boxType = try await reader.readString(at: offset + 4, length: 4)
 
         if boxType == "moov" {
             return (offset, boxSize)

@@ -49,7 +49,7 @@ public class JpegReader: ImageReader {
         }
 
         let entry = entries[index]
-        return try await reader.readAt(offset: UInt64(entry.offset), length: entry.length)
+        return try await reader.read(at: UInt64(entry.offset), length: entry.length)
     }
 
     public func getMetadata() async throws -> Metadata {
@@ -64,20 +64,31 @@ public class JpegReader: ImageReader {
 
     private func loadMetadata() async throws {
         // Read JPEG header and find EXIF data
-        try await reader.prefetch(offset: 0, length: 16384)
+        try await reader.prefetch(at: 0, length: 16384)
 
         // Validate JPEG format
-        guard try await reader.readAt(offset: 0, length: 2) == Data([0xFF, 0xD8]) else {
+        guard try await reader.read(at: 0, length: 2) == Data([0xFF, 0xD8]) else {
             throw ImageReaderError.invalidData
         }
 
-        // Extract main image dimensions
-        let mainImageDimensions = try await extractMainImageDimensions()
-
         // Find EXIF data and parse thumbnails
         var entries: [ThumbnailEntry] = []
-        if let (exifOffset, exifLength) = try await extractExifData() {
-            try await parseExifForThumbnails(exifOffset: exifOffset, exifLength: exifLength, entries: &entries)
+
+        guard let (exifOffset, _) = try await extractExifData() else {
+            throw ImageReaderError.invalidData
+        }
+
+        var ifdOffset = try await parseTiffHeader(at: exifOffset)
+        var ifdIndex = 0
+
+        while ifdOffset > 0 {
+            ifdOffset = try await parseIFD(
+                exifOffset: UInt64(exifOffset),
+                ifdOffset: UInt64(ifdOffset),
+                entries: &entries,
+                isThumbnail: ifdIndex > 0,
+            )
+            ifdIndex += 1
         }
 
         // Look for MPF thumbnails
@@ -85,41 +96,6 @@ public class JpegReader: ImageReader {
         entries.append(contentsOf: mpfEntries)
 
         thumbnailEntries = entries
-        metadata = Metadata(width: mainImageDimensions.width, height: mainImageDimensions.height)
-    }
-
-    private func extractMainImageDimensions() async throws -> (width: UInt32, height: UInt32) {
-        var offset: UInt64 = 2 // Skip JPEG SOI marker
-
-        // Search for SOF marker (0xFFC0, 0xFFC1, 0xFFC2, etc.)
-        // Increase search range for complex JPEG files
-        while offset < 1_048_576 { // 1MB search range
-            try await reader.prefetch(offset: offset, length: 4)
-            let marker = try await reader.readUInt16(offset: offset)
-            guard (marker & 0xFF00) == 0xFF00 else { break }
-
-            let markerType = UInt8(marker & 0xFF)
-            let segmentLength = try await reader.readUInt16(offset: offset + 2)
-
-            // Check if this is a SOF marker (0xC0-0xCF, but not 0xC4, 0xC8, 0xCC)
-            if (markerType >= 0xC0 && markerType <= 0xCF) &&
-                markerType != 0xC4 && markerType != 0xC8 && markerType != 0xCC
-            {
-                // Read SOF segment
-                try await reader.prefetch(offset: offset + 4, length: UInt32(segmentLength))
-                if segmentLength >= 6 {
-                    let height = try await reader.readUInt16(offset: offset + 5)
-                    let width = try await reader.readUInt16(offset: offset + 7)
-                    logger.debug("Found SOF marker at offset \(offset), width=\(width), height=\(height)")
-                    return (UInt32(width), UInt32(height))
-                }
-            }
-
-            if segmentLength < 2 { break }
-            offset += 2 + UInt64(segmentLength)
-        }
-
-        throw ImageReaderError.invalidData
     }
 
     private func extractExifData() async throws -> (UInt64, UInt32)? {
@@ -127,15 +103,15 @@ public class JpegReader: ImageReader {
 
         // Search for EXIF segment (APP1 with EXIF identifier)
         while offset < 65536 {
-            let marker = try await reader.readUInt16(offset: offset)
+            let marker = try await reader.readUInt16(at: offset)
             guard (marker & 0xFF00) == 0xFF00 else { break }
 
             let markerType = UInt8(marker & 0xFF)
-            let segmentLength = try await reader.readUInt16(offset: offset + 2)
+            let segmentLength = try await reader.readUInt16(at: offset + 2)
 
             if markerType == 0xE1 { // APP1 segment
-                let segmentData = try await reader.readAt(offset: offset + 4, length: UInt32(segmentLength))
-                if segmentData.starts(with: "Exif".data(using: .ascii)!) {
+                let header = try await reader.readString(at: UInt64(offset + 4), length: 4)
+                if header == "Exif" {
                     logger.debug("Found EXIF data at offset \(offset + 4)")
                     let exifOffset = offset + 10 // offset + 4 (segment header) + 6 (Exif\0\0)
                     let exifLength = UInt32(segmentLength - 6) // Skip "Exif\0\0"
@@ -150,58 +126,25 @@ public class JpegReader: ImageReader {
         return nil
     }
 
-    private func parseExifForThumbnails(exifOffset: UInt64, exifLength: UInt32, entries: inout [ThumbnailEntry]) async throws {
-        guard exifLength >= 8 else { return }
-
-        // Prefetch EXIF data for dense reading
-        try await reader.prefetch(offset: exifOffset, length: exifLength)
-
-        // Parse TIFF header
-        let tiffHeader = try await parseTiffHeader(exifOffset: exifOffset)
-
-        // Parse IFD0 (main image)
-        if let ifd1Offset = try await parseIFD(
-            exifOffset: exifOffset,
-            ifdOffset: UInt64(tiffHeader.ifdOffset),
-            entries: &entries,
-            isThumbnail: false,
-            byteOrder: tiffHeader.byteOrder
-        ) {
-            // Parse IFD1 (thumbnail)
-            if ifd1Offset > 0 {
-                _ = try await parseIFD(
-                    exifOffset: exifOffset,
-                    ifdOffset: UInt64(ifd1Offset),
-                    entries: &entries,
-                    isThumbnail: true,
-                    byteOrder: tiffHeader.byteOrder
-                )
-            }
-        }
-    }
-
-    private func parseTiffHeader(exifOffset: UInt64) async throws -> (byteOrder: ByteOrder, ifdOffset: UInt32) {
+    private func parseTiffHeader(at offset: UInt64) async throws -> UInt32 {
         // Check byte order
-        let byteOrderData = try await reader.readAt(offset: exifOffset, length: 2)
-        let byteOrder: ByteOrder
+        let byteOrderData = try await reader.read(at: offset, length: 2)
         if byteOrderData[0] == 0x49, byteOrderData[1] == 0x49 { // "II" - Intel (little endian)
-            byteOrder = .littleEndian
+            reader.setByteOrder(.littleEndian)
         } else if byteOrderData[0] == 0x4D, byteOrderData[1] == 0x4D { // "MM" - Motorola (big endian)
-            byteOrder = .bigEndian
+            reader.setByteOrder(.bigEndian)
         } else {
             throw ImageReaderError.invalidData
         }
 
-        reader.setByteOrder(byteOrder)
-
         // Check magic number (42)
-        let magic = try await reader.readUInt16(offset: exifOffset + 2)
+        let magic = try await reader.readUInt16(at: offset + 2)
         guard magic == 42 else { throw ImageReaderError.invalidData }
 
         // Read IFD offset
-        let ifdOffset = try await reader.readUInt32(offset: exifOffset + 4)
+        let ifdOffset = try await reader.readUInt32(at: offset + 4)
 
-        return (byteOrder, ifdOffset)
+        return ifdOffset
     }
 
     private func parseIFD(
@@ -209,15 +152,14 @@ public class JpegReader: ImageReader {
         ifdOffset: UInt64,
         entries: inout [ThumbnailEntry],
         isThumbnail: Bool,
-        byteOrder _: ByteOrder
-    ) async throws -> UInt32? {
+    ) async throws -> UInt32 {
         let absoluteIfdOffset = exifOffset + ifdOffset
 
-        let entryCount = try await reader.readUInt16(offset: absoluteIfdOffset)
+        let entryCount = try await reader.readUInt16(at: absoluteIfdOffset)
         let entriesDataLength = UInt32(entryCount * 12 + 4) // 12 bytes per entry + 4 bytes for next IFD offset
 
         // Prefetch all IFD entries for dense reading
-        try await reader.prefetch(offset: absoluteIfdOffset, length: entriesDataLength)
+        try await reader.prefetch(at: absoluteIfdOffset, length: entriesDataLength)
 
         var currentOffset = absoluteIfdOffset + 2
 
@@ -230,21 +172,28 @@ public class JpegReader: ImageReader {
 
         // Parse directory entries
         for _ in 0 ..< entryCount {
-            let tag = try await reader.readUInt16(offset: currentOffset)
-            let _ = try await reader.readUInt16(offset: currentOffset + 2) // type
-            let _ = try await reader.readUInt32(offset: currentOffset + 4) // count
-            let valueOffset = try await reader.readUInt32(offset: currentOffset + 8)
+            let tag = try await reader.readUInt16(at: currentOffset)
+            let _ = try await reader.readUInt16(at: currentOffset + 2) // type
+            let _ = try await reader.readUInt32(at: currentOffset + 4) // count
+            let value = try await reader.readUInt32(at: currentOffset + 8)
 
             if isThumbnail {
                 switch tag {
                 case 0x0201: // JPEGInterchangeFormat (thumbnail offset)
-                    thumbnailOffset = valueOffset
+                    thumbnailOffset = value
                 case 0x0202: // JPEGInterchangeFormatLength (thumbnail length)
-                    thumbnailLength = valueOffset
+                    thumbnailLength = value
                 case 0x0100: // ImageWidth
-                    thumbnailWidth = valueOffset
+                    thumbnailWidth = value
                 case 0x0101: // ImageLength (Height)
-                    thumbnailHeight = valueOffset
+                    thumbnailHeight = value
+                default:
+                    break
+                }
+            } else {
+                switch tag {
+                case 0x8769: // ExifIFD
+                    metadata = try await parseExifIFD(at: exifOffset + UInt64(value))
                 default:
                     break
                 }
@@ -260,7 +209,6 @@ public class JpegReader: ImageReader {
             let entry = ThumbnailEntry(
                 offset: absoluteOffset,
                 length: length,
-                type: "thumbnail",
                 width: thumbnailWidth,
                 height: thumbnailHeight
             )
@@ -269,31 +217,65 @@ public class JpegReader: ImageReader {
         }
 
         // Read next IFD offset
-        let nextIFDOffset = try await reader.readUInt32(offset: currentOffset)
+        let nextIFDOffset = try await reader.readUInt32(at: currentOffset)
 
-        return nextIFDOffset > 0 ? nextIFDOffset : nil
+        return nextIFDOffset
+    }
+
+    private func parseExifIFD(at offset: UInt64) async throws -> Metadata {
+        try await reader.prefetch(at: offset, length: 1024)
+        let entryCount = try await reader.readUInt16(at: offset)
+        logger.debug("Parsing EXIF IFD at offset \(offset), entryCount: \(entryCount)")
+
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+
+        for i in 0 ..< Int(entryCount) {
+            let entryOffset = offset + 2 + UInt64(i) * 12
+
+            let tag = try await reader.readUInt16(at: entryOffset)
+            let type = try await reader.readUInt16(at: entryOffset + 2)
+            // let count = try await reader.readUInt32(offset: entryOffset + 4)
+            let value = if type == 3 {
+                try UInt32(await reader.readUInt16(at: entryOffset + 8))
+            } else {
+                try await reader.readUInt32(at: entryOffset + 8)
+            }
+
+            switch tag {
+            case 0xA002: // ExifImageWidth
+                width = value
+            case 0xA003: // ExifImageHeight
+                height = value
+            default:
+                break
+            }
+        }
+
+        return Metadata(width: width, height: height)
     }
 
     private func extractMPFThumbnails() async throws -> [ThumbnailEntry] {
         var offset: UInt64 = 2 // Skip JPEG SOI marker
 
         // Search for APP2 segments that contain MPF data
-        while true {
-            try await reader.prefetch(offset: offset, length: 256)
-            let marker = try await reader.readUInt16(offset: offset)
-            guard (marker & 0xFF00) == 0xFF00 else { break }
+        while offset < 1_048_576 { // 1MB search range
+            try await reader.prefetch(at: offset, length: 256)
+            guard try await reader.readUInt8(at: offset) == 0xFF else {
+                break
+            }
 
-            let markerType = UInt8(marker & 0xFF)
-            let segmentLength = try await reader.readUInt16(offset: offset + 2)
+            let markerType = try await reader.readUInt8(at: offset + 1)
+            let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
 
             if markerType == 0xE2 { // APP2 segment
-                let segmentData = try await reader.readAt(offset: offset + 4, length: UInt32(segmentLength))
-                if segmentData.starts(with: "MPF\0".data(using: .ascii)!) ||
-                    segmentData.starts(with: "MPF ".data(using: .ascii)!)
-                {
-                    logger.debug("Found MPF data in APP2 segment at offset \(offset + 4), segment size: \(segmentData.count)")
+                let header = try await reader.readString(at: offset + 4, length: 4)
+
+                // Check for MPF data - MPF format starts with "MPF\0" or directly with TIFF header
+                if header == "MPF\0" || header == "MPF " {
+                    logger.debug("Found MPF data in APP2 segment at offset \(offset + 4), segment size: \(segmentLength - 2)")
                     let mpfOffset = offset + 4
-                    let mpfEntries = try await parseMPFData(mpfOffset: mpfOffset, mpfLength: UInt32(segmentLength))
+                    let mpfEntries = try await parseMPFData(mpfOffset: mpfOffset, mpfLength: UInt32(segmentLength - 2))
                     logger.debug("MPF parsing returned \(mpfEntries.count) entries")
                     return mpfEntries
                 }
@@ -314,7 +296,7 @@ public class JpegReader: ImageReader {
         }
 
         // Prefetch MPF data for dense reading
-        try await reader.prefetch(offset: mpfOffset, length: mpfLength)
+        try await reader.prefetch(at: mpfOffset, length: mpfLength)
 
         // Parse MPF header
         let tiffDataOffset = mpfOffset + 4 // Skip "MPF\0" or "MPF "
@@ -322,18 +304,16 @@ public class JpegReader: ImageReader {
         logger.debug("MPF data size: \(mpfLength) bytes, TIFF data starts at offset \(tiffDataOffset)")
 
         // Parse TIFF header within MPF
-        let tiffHeader = try await parseTiffHeader(exifOffset: tiffDataOffset)
-
-        logger.debug("MPF TIFF header parsed, byte order: \(tiffHeader.byteOrder), IFD offset: \(tiffHeader.ifdOffset)")
+        let ifdOffset = try await parseTiffHeader(at: tiffDataOffset)
 
         // Parse MP Index IFD
-        let mpIndexIFDOffset = tiffDataOffset + UInt64(tiffHeader.ifdOffset)
+        let mpIndexIFDOffset = tiffDataOffset + UInt64(ifdOffset)
 
-        let entryCount = try await reader.readUInt16(offset: mpIndexIFDOffset)
+        let entryCount = try await reader.readUInt16(at: mpIndexIFDOffset)
         let entriesDataLength = UInt32(entryCount * 12 + 4) // 12 bytes per entry + 4 bytes for next IFD offset
 
         // Prefetch all IFD entries for dense reading
-        try await reader.prefetch(offset: mpIndexIFDOffset, length: entriesDataLength)
+        try await reader.prefetch(at: mpIndexIFDOffset, length: entriesDataLength)
 
         var currentOffset = mpIndexIFDOffset + 2
 
@@ -344,10 +324,10 @@ public class JpegReader: ImageReader {
 
         // Parse MP Index IFD entries
         for _ in 0 ..< entryCount {
-            let tag = try await reader.readUInt16(offset: currentOffset)
-            let type = try await reader.readUInt16(offset: currentOffset + 2)
-            let count = try await reader.readUInt32(offset: currentOffset + 4)
-            let valueOffset = try await reader.readUInt32(offset: currentOffset + 8)
+            let tag = try await reader.readUInt16(at: currentOffset)
+            let type = try await reader.readUInt16(at: currentOffset + 2)
+            let count = try await reader.readUInt32(at: currentOffset + 4)
+            let valueOffset = try await reader.readUInt32(at: currentOffset + 8)
 
             switch tag {
             case 0xB000: // MP Format Version
@@ -399,17 +379,17 @@ public class JpegReader: ImageReader {
 
         // Prefetch all MP entries for dense reading (16 bytes per entry)
         let entriesDataLength = UInt32(numberOfImages * 16)
-        try await reader.prefetch(offset: entryOffset, length: entriesDataLength)
+        try await reader.prefetch(at: entryOffset, length: entriesDataLength)
 
         // Parse all MP entries
         var tempOffset = entryOffset
 
         for i in 0 ..< numberOfImages {
-            let imageAttributes = try await reader.readUInt32(offset: tempOffset)
-            let imageSize = try await reader.readUInt32(offset: tempOffset + 4)
-            let imageOffset = try await reader.readUInt32(offset: tempOffset + 8)
-            let _ = try await reader.readUInt16(offset: tempOffset + 12) // dependent1
-            let _ = try await reader.readUInt16(offset: tempOffset + 14) // dependent2
+            let imageAttributes = try await reader.readUInt32(at: tempOffset)
+            let imageSize = try await reader.readUInt32(at: tempOffset + 4)
+            let imageOffset = try await reader.readUInt32(at: tempOffset + 8)
+            let _ = try await reader.readUInt16(at: tempOffset + 12) // dependent1
+            let _ = try await reader.readUInt16(at: tempOffset + 14) // dependent2
 
             // Extract flags, format, and type from imageAttributes
             let flags = (imageAttributes & 0xF800_0000) >> 27
@@ -420,7 +400,11 @@ public class JpegReader: ImageReader {
 
             // Process entry to create thumbnail
             // Skip invalid entries
-            guard imageSize > 0, imageSize < 50_000_000 else { continue }
+            guard imageSize > 0, imageSize < 50_000_000 else {
+                logger.debug("Skipping entry \(i): invalid size \(imageSize)")
+                tempOffset += 16
+                continue
+            }
 
             // Determine if this is a preview/thumbnail image
             let isPreview: Bool
@@ -440,13 +424,21 @@ public class JpegReader: ImageReader {
                 isPreview = (type & 0xFF0000) == 0x010000
             }
 
+            logger.debug("MP Entry \(i): isPreview=\(isPreview), type=0x\(String(type, radix: 16))")
+
             // Only extract preview/thumbnail images, skip primary image
-            guard isPreview else { continue }
+            guard isPreview else {
+                logger.debug("Skipping entry \(i): not a preview/thumbnail")
+                tempOffset += 16
+                continue
+            }
 
             // Calculate absolute offset
             if imageOffset == 0 {
                 // Offset 0 means this is the primary image at the start of the file
                 // For thumbnails, this shouldn't happen, but handle it gracefully
+                logger.debug("Skipping entry \(i): offset is 0")
+                tempOffset += 16
                 continue
             }
 
@@ -456,7 +448,6 @@ public class JpegReader: ImageReader {
             let thumbnailEntry = ThumbnailEntry(
                 offset: absoluteOffset,
                 length: imageSize,
-                type: "mpf_thumbnail",
                 width: nil, // MPF doesn't provide dimensions in header
                 height: nil
             )
@@ -475,7 +466,6 @@ public class JpegReader: ImageReader {
 private struct ThumbnailEntry {
     let offset: UInt32
     let length: UInt32
-    let type: String
     let width: UInt32?
     let height: UInt32?
 }

@@ -194,8 +194,8 @@ private struct ItemPropertyAssociation {
 
 private func readMetaBox(reader: Reader) async throws -> Data? {
     // Read initial header with prefetch for better performance
-    try await reader.prefetch(offset: 0, length: 4096)
-    let data = try await reader.readAt(offset: 0, length: 4096)
+    try await reader.prefetch(at: 0, length: 4096)
+    let data = try await reader.read(at: 0, length: 4096)
     guard data.count >= 8 else { return nil }
 
     var offset: UInt64 = 0
@@ -225,10 +225,10 @@ private func readMetaBox(reader: Reader) async throws -> Data? {
     while offset + 8 < 65536 { // Limit search to reasonable file header size
         // Ensure we have enough data in buffer
         if offset + 8 > data.count {
-            try await reader.prefetch(offset: offset, length: 8192)
+            try await reader.prefetch(at: offset, length: 8192)
         }
 
-        let headerData = try await reader.readAt(offset: offset, length: 8)
+        let headerData = try await reader.read(at: offset, length: 8)
         guard headerData.count == 8 else { break }
 
         let boxSize = headerData.subdata(in: 0 ..< 4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
@@ -238,8 +238,8 @@ private func readMetaBox(reader: Reader) async throws -> Data? {
             logger.debug("Found meta box: offset=\(offset), size=\(boxSize)")
 
             // Prefetch the entire meta box for efficient parsing
-            try await reader.prefetch(offset: offset, length: UInt32(boxSize))
-            return try await reader.readAt(offset: offset, length: boxSize)
+            try await reader.prefetch(at: offset, length: UInt32(boxSize))
+            return try await reader.read(at: offset, length: boxSize)
         }
 
         if boxSize <= 8 {
