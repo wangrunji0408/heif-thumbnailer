@@ -18,6 +18,7 @@ public class JpegReader: ImageReader {
     private let reader: Reader
     private var thumbnailEntries: [ThumbnailEntry]?
     private var metadata: Metadata?
+    private var imageOrientation: UInt16? // 存储主图像的 orientation
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
         reader = Reader(readAt: readAt)
@@ -29,12 +30,15 @@ public class JpegReader: ImageReader {
         }
 
         return thumbnailEntries?.map { entry in
-            ThumbnailInfo(
+            let orientation = imageOrientation ?? 1
+            let (rotation, _) = orientationToRotation(orientation)
+
+            return ThumbnailInfo(
                 size: entry.length,
                 format: "jpeg",
                 width: entry.width,
                 height: entry.height,
-                rotation: nil
+                rotation: rotation
             )
         } ?? []
     }
@@ -49,7 +53,23 @@ public class JpegReader: ImageReader {
         }
 
         let entry = entries[index]
-        return try await reader.read(at: UInt64(entry.offset), length: entry.length)
+        let thumbnailData = try await reader.read(at: UInt64(entry.offset), length: entry.length)
+
+        // 应用方向校正
+        let orientation = imageOrientation ?? 1
+        let (rotation, flip) = orientationToRotation(orientation)
+
+        if rotation != 0 || flip {
+            logger.debug("Applying orientation correction: orientation=\(orientation), rotation=\(rotation), flip=\(flip)")
+            if let correctedData = applyOrientationCorrection(to: thumbnailData, rotation: rotation, flip: flip) {
+                return correctedData
+            } else {
+                logger.warning("Failed to apply orientation correction, returning original data")
+                return thumbnailData
+            }
+        }
+
+        return thumbnailData
     }
 
     public func getMetadata() async throws -> Metadata {
@@ -173,9 +193,13 @@ public class JpegReader: ImageReader {
         // Parse directory entries
         for _ in 0 ..< entryCount {
             let tag = try await reader.readUInt16(at: currentOffset)
-            let _ = try await reader.readUInt16(at: currentOffset + 2) // type
+            let type = try await reader.readUInt16(at: currentOffset + 2)
             let _ = try await reader.readUInt32(at: currentOffset + 4) // count
-            let value = try await reader.readUInt32(at: currentOffset + 8)
+            let value = if type == 3 {
+                try UInt32(await reader.readUInt16(at: currentOffset + 8))
+            } else {
+                try await reader.readUInt32(at: currentOffset + 8)
+            }
 
             if isThumbnail {
                 switch tag {
@@ -194,6 +218,9 @@ public class JpegReader: ImageReader {
                 switch tag {
                 case 0x8769: // ExifIFD
                     metadata = try await parseExifIFD(at: exifOffset + UInt64(value))
+                case 0x0112: // Orientation
+                    imageOrientation = UInt16(value)
+                    logger.debug("Found main image orientation: \(imageOrientation ?? 0)")
                 default:
                     break
                 }
@@ -210,7 +237,7 @@ public class JpegReader: ImageReader {
                 offset: absoluteOffset,
                 length: length,
                 width: thumbnailWidth,
-                height: thumbnailHeight
+                height: thumbnailHeight,
             )
             entries.append(entry)
             logger.debug("Found thumbnail: relativeOffset=\(relativeOffset), absoluteOffset=\(absoluteOffset), length=\(length), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)")
@@ -223,7 +250,6 @@ public class JpegReader: ImageReader {
     }
 
     private func parseExifIFD(at offset: UInt64) async throws -> Metadata {
-        try await reader.prefetch(at: offset, length: 1024)
         let entryCount = try await reader.readUInt16(at: offset)
         logger.debug("Parsing EXIF IFD at offset \(offset), entryCount: \(entryCount)")
 
@@ -449,7 +475,7 @@ public class JpegReader: ImageReader {
                 offset: absoluteOffset,
                 length: imageSize,
                 width: nil, // MPF doesn't provide dimensions in header
-                height: nil
+                height: nil,
             )
             thumbnails.append(thumbnailEntry)
             logger.debug("Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), type=0x\(String(type, radix: 16))")
