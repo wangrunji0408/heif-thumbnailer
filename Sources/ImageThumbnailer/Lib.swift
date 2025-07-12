@@ -4,7 +4,7 @@ public protocol ImageReader {
     init(readAt: @escaping (UInt64, UInt32) async throws -> Data)
     func getThumbnailList() async throws -> [ThumbnailInfo]
     func getThumbnail(at index: Int) async throws -> Data
-    func getMetadata() async throws -> Metadata?
+    func getMetadata() async throws -> Metadata
 }
 
 public struct ThumbnailInfo {

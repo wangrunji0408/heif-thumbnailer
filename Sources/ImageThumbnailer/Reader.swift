@@ -3,9 +3,14 @@ import Foundation
 class Reader {
     private let readAt: (UInt64, UInt32) async throws -> Data
     private var buffers: [(UInt64, Data)] = []
+    private var byteOrder: ByteOrder = .bigEndian
 
     init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
         self.readAt = readAt
+    }
+
+    func setByteOrder(_ byteOrder: ByteOrder) {
+        self.byteOrder = byteOrder
     }
 
     func readAt(offset: UInt64, length: UInt32) async throws -> Data {
@@ -26,4 +31,31 @@ class Reader {
         let data = try await readAt(offset, length)
         buffers.append((offset, data))
     }
+
+    func readUInt16(offset: UInt64) async throws -> UInt16 {
+        let data = try await readAt(offset: offset, length: 2)
+        if byteOrder == .bigEndian {
+            return data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
+        } else {
+            return data.withUnsafeBytes { $0.load(as: UInt16.self) }
+        }
+    }
+
+    func readUInt32(offset: UInt64) async throws -> UInt32 {
+        let data = try await readAt(offset: offset, length: 4)
+        if byteOrder == .bigEndian {
+            return data.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        } else {
+            return data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        }
+    }
+
+    func readString(offset: UInt64, length: UInt32) async throws -> String {
+        return try String(data: await readAt(offset: offset, length: length), encoding: .ascii) ?? ""
+    }
+}
+
+enum ByteOrder {
+    case bigEndian
+    case littleEndian
 }

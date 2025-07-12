@@ -18,7 +18,7 @@ public class HeifReader: ImageReader {
 
     public func getThumbnailList() async throws -> [ThumbnailInfo] {
         if thumbnailInfos == nil {
-            try await loadThumbnailInfos()
+            try await loadMetadata()
         }
 
         return thumbnailInfos?.map { info in
@@ -34,7 +34,7 @@ public class HeifReader: ImageReader {
 
     public func getThumbnail(at index: Int) async throws -> Data {
         if thumbnailInfos == nil {
-            try await loadThumbnailInfos()
+            try await loadMetadata()
         }
 
         guard let infos = thumbnailInfos, index < infos.count else {
@@ -46,32 +46,101 @@ public class HeifReader: ImageReader {
         return try await createThumbnail(from: info, data: data)
     }
 
-    public func getMetadata() async throws -> Metadata? {
+    public func getMetadata() async throws -> Metadata {
         if metadata == nil {
             try await loadMetadata()
+        }
+        guard let metadata = metadata else {
+            throw ImageReaderError.invalidData
         }
         return metadata
     }
 
-    private func loadThumbnailInfos() async throws {
-        guard let metaData = try await readMetaBox(readAt: readAt) else {
+    private func loadMetadata() async throws {
+        let reader = Reader(readAt: readAt)
+
+        guard let metaData = try await readMetaBox(reader: reader) else {
             throw ImageReaderError.metaBoxNotFound
         }
 
-        thumbnailInfos = parseMetaBox(data: metaData)
+        // Parse the meta box once to get both thumbnails and primary image metadata
+        let (thumbnails, primaryMetadata) = parseMetaBoxForBoth(data: metaData)
+
+        thumbnailInfos = thumbnails
+        if let width = primaryMetadata.width, let height = primaryMetadata.height {
+            metadata = Metadata(width: width, height: height)
+        } else {
+            throw ImageReaderError.invalidData
+        }
     }
 
-    private func loadMetadata() async throws {
-        // For HEIF files, we can try to get metadata from the primary image
-        // This is a simplified implementation
-        guard let metaData = try await readMetaBox(readAt: readAt) else {
-            return
+    private func parseMetaBoxForBoth(data: Data) -> ([HeifThumbnailEntry], (width: UInt32?, height: UInt32?)) {
+        var offset: UInt64 = 12 // Skip meta box header + version/flags
+
+        var items: [ItemInfo] = []
+        var locations: [ItemLocation] = []
+        var primaryItemId: UInt32 = 0
+        var thumbnailReferences: [(from: UInt32, to: [UInt32])] = []
+        var properties: [ItemProperty] = []
+        var propertyAssociations: [ItemPropertyAssociation] = []
+
+        logger.debug("Parsing meta box, data size: \(data.count) bytes")
+
+        // Parse all sub-boxes
+        while offset + 8 < data.count {
+            let savedOffset = offset
+            guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &offset) else { break }
+
+            let boxData = data.subdata(
+                in: Int(savedOffset + 8) ..< min(Int(savedOffset + UInt64(boxSize)), data.count))
+
+            switch boxType {
+            case "pitm":
+                primaryItemId = parsePrimaryItem(data: boxData) ?? 0
+                logger.debug("Primary item ID: \(primaryItemId)")
+
+            case "iinf":
+                items = parseItemInfo(data: boxData)
+                logger.debug("Found \(items.count) items")
+
+            case "iloc":
+                locations = parseItemLocation(data: boxData)
+                logger.debug("Found \(locations.count) locations")
+
+            case "iref":
+                thumbnailReferences = parseItemReference(data: boxData)
+                logger.debug("Found \(thumbnailReferences.count) references")
+
+            case "iprp":
+                (properties, propertyAssociations) = parseItemProperties(data: boxData)
+                logger.debug(
+                    "Found \(properties.count) properties, \(propertyAssociations.count) associations")
+
+            default:
+                logger.debug("Skipping box type: \(boxType)")
+            }
+
+            offset = boxSize > 8 ? savedOffset + UInt64(boxSize) : UInt64(data.count)
         }
 
-        let infos = parseMetaBox(data: metaData)
-        if let firstInfo = infos.first {
-            metadata = Metadata(width: firstInfo.width ?? 0, height: firstInfo.height ?? 0)
-        }
+        // Build thumbnail infos
+        let thumbnails = buildThumbnailInfos(
+            items: items,
+            locations: locations,
+            primaryItemId: primaryItemId,
+            thumbnailReferences: thumbnailReferences,
+            properties: properties,
+            propertyAssociations: propertyAssociations
+        )
+
+        // Get primary image metadata
+        let (_, width, height, _) = extractItemProperties(
+            itemId: primaryItemId,
+            properties: properties,
+            propertyAssociations: propertyAssociations
+        )
+
+        return (thumbnails, (width, height))
     }
 }
 
@@ -123,11 +192,10 @@ private struct ItemPropertyAssociation {
 
 // MARK: - HEIC Format Validation
 
-private func readMetaBox(readAt: @escaping (UInt64, UInt32) async throws -> Data) async throws
-    -> Data?
-{
-    // Read initial header
-    let data = try await readAt(0, 2048)
+private func readMetaBox(reader: Reader) async throws -> Data? {
+    // Read initial header with prefetch for better performance
+    try await reader.prefetch(offset: 0, length: 4096)
+    let data = try await reader.readAt(offset: 0, length: 4096)
     guard data.count >= 8 else { return nil }
 
     var offset: UInt64 = 0
@@ -153,24 +221,31 @@ private func readMetaBox(readAt: @escaping (UInt64, UInt32) async throws -> Data
 
     offset = UInt64(ftypSize)
 
-    // Search in current data
-    while offset + 8 < data.count {
-        let savedOffset = offset
-        guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &offset) else { break }
-
-        if boxType == "meta" {
-            logger.debug("Found meta box: offset=\(savedOffset), size=\(boxSize)")
-            if savedOffset + UInt64(boxSize) <= data.count {
-                return data.subdata(in: Int(savedOffset) ..< Int(savedOffset + UInt64(boxSize)))
-            } else {
-                return try await readAt(savedOffset, boxSize)
-            }
+    // Search for meta box with optimized reading
+    while offset + 8 < 65536 { // Limit search to reasonable file header size
+        // Ensure we have enough data in buffer
+        if offset + 8 > data.count {
+            try await reader.prefetch(offset: offset, length: 8192)
         }
 
-        if boxSize > 8, savedOffset + UInt64(boxSize) <= data.count {
-            offset = savedOffset + UInt64(boxSize)
+        let headerData = try await reader.readAt(offset: offset, length: 8)
+        guard headerData.count == 8 else { break }
+
+        let boxSize = headerData.subdata(in: 0 ..< 4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let boxType = String(data: headerData.subdata(in: 4 ..< 8), encoding: .ascii) ?? ""
+
+        if boxType == "meta" {
+            logger.debug("Found meta box: offset=\(offset), size=\(boxSize)")
+
+            // Prefetch the entire meta box for efficient parsing
+            try await reader.prefetch(offset: offset, length: UInt32(boxSize))
+            return try await reader.readAt(offset: offset, length: boxSize)
+        }
+
+        if boxSize <= 8 {
+            offset += 8
         } else {
-            break
+            offset += UInt64(boxSize)
         }
     }
 

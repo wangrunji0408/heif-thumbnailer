@@ -77,6 +77,9 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 return
             }
 
+            let metadata = try await reader.getMetadata()
+            logger.info("metadata: size: \(metadata.width)x\(metadata.height)")
+
             let thumbnailList = try await reader.getThumbnailList()
             if thumbnailList.isEmpty {
                 logger.error("no thumbnail found in file")
@@ -87,7 +90,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             let index = indices.first(where: { thumbnailList[$0].width ?? 0 >= shortSideLength ?? 0 }) ?? 0
             let info = thumbnailList[index]
             let thumbnail = try await reader.getThumbnail(at: index)
-            logger.info("thumbnail index: \(index), format: \(info.format), size: \(info.size) bytes, width: \(info.width ?? 0), height: \(info.height ?? 0), rotation: \(info.rotation ?? 0)")
+            logger.info("thumbnail index: \(index), format: \(info.format), size: \(info.size) bytes, size: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)")
 
             // save thumbnail data
             let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(info.format)")

@@ -6,17 +6,17 @@ private let logger = Logger(label: "com.hdremote.Mp4Thumbnailer")
 // MARK: - Mp4Reader Implementation
 
 public class Mp4Reader: ImageReader {
-    private let readAt: (UInt64, UInt32) async throws -> Data
+    private let reader: Reader
     private var imageInfos: [Mp4ImageInfo]?
     private var metadata: Metadata?
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
-        self.readAt = readAt
+        reader = Reader(readAt: readAt)
     }
 
     public func getThumbnailList() async throws -> [ThumbnailInfo] {
         if imageInfos == nil {
-            try await loadImageInfos()
+            try await loadMetadata()
         }
 
         return imageInfos?.map { info in
@@ -32,7 +32,7 @@ public class Mp4Reader: ImageReader {
 
     public func getThumbnail(at index: Int) async throws -> Data {
         if imageInfos == nil {
-            try await loadImageInfos()
+            try await loadMetadata()
         }
 
         guard let infos = imageInfos, index < infos.count else {
@@ -42,40 +42,93 @@ public class Mp4Reader: ImageReader {
         return infos[index].data
     }
 
-    public func getMetadata() async throws -> Metadata? {
+    public func getMetadata() async throws -> Metadata {
         if metadata == nil {
             try await loadMetadata()
+        }
+        guard let metadata = metadata else {
+            throw ImageReaderError.invalidData
         }
         return metadata
     }
 
-    private func loadImageInfos() async throws {
-        // Read file header
-        let headerData = try await readAt(0, 1024)
+    private func loadMetadata() async throws {
+        // Read file header with prefetch for better performance
+        try await reader.prefetch(offset: 0, length: 2048)
 
         // Validate MP4 format
-        guard validateMp4Format(data: headerData) else {
+        guard try await validateMp4Format(reader: reader) else {
             throw ImageReaderError.invalidData
         }
 
         // Find moov box
-        guard let (moovOffset, moovSize) = try await findMoovBoxInHeader(headerData: headerData, readAt: readAt) else {
+        guard let (moovOffset, moovSize) = try await findMoovBox(reader: reader) else {
             throw ImageReaderError.invalidData
         }
 
-        let moovData = try await readAt(moovOffset + 8, moovSize - 8)
+        // Prefetch moov box data for efficient parsing
+        try await reader.prefetch(offset: moovOffset + 8, length: moovSize - 8)
+        let moovData = try await reader.readAt(offset: moovOffset + 8, length: moovSize - 8)
 
-        // Parse moov box to find thumbnails
-        imageInfos = parseMoovBox(data: moovData)
+        // Parse moov box to find thumbnails and track dimensions
+        let (thumbnails, trackDimensions) = parseMoovBoxForBoth(data: moovData)
+
+        imageInfos = thumbnails
+        if let dimensions = trackDimensions {
+            metadata = Metadata(width: dimensions.width, height: dimensions.height)
+        } else {
+            throw ImageReaderError.invalidData
+        }
     }
 
-    private func loadMetadata() async throws {
-        // For MP4 files, we can get metadata from the first thumbnail
-        if let infos = imageInfos, let firstInfo = infos.first,
-           let width = firstInfo.width, let height = firstInfo.height
-        {
-            metadata = Metadata(width: width, height: height)
+    private func parseMoovBoxForBoth(data: Data) -> ([Mp4ImageInfo], (width: UInt32, height: UInt32)?) {
+        logger.debug("Parsing moov box, size: \(data.count)")
+        var imageInfos: [Mp4ImageInfo] = []
+        var trackDimensions: (width: UInt32, height: UInt32)?
+
+        // Try to get track dimensions first
+        trackDimensions = parseTrackDimensions(data: data)
+
+        // Try: moov/udta/meta/ilst
+        if let udtaData = findBoxData(in: data, boxType: "udta") {
+            logger.debug("Found udta box, size: \(udtaData.count)")
+            // 在udta box中查找meta box
+            if let metaData = findBoxData(in: udtaData, boxType: "meta") {
+                logger.debug("Found meta box in udta, size: \(metaData.count)")
+                // 在meta box中查找ilst box
+                if let ilstData = findBoxData(in: metaData, boxType: "ilst") {
+                    logger.debug("Found ilst box in udta/meta, size: \(ilstData.count)")
+                    imageInfos.append(contentsOf: parseIlstBox(data: ilstData))
+                }
+            }
         }
+
+        return (imageInfos, trackDimensions)
+    }
+
+    private func parseTrackDimensions(data: Data) -> (width: UInt32, height: UInt32)? {
+        // Look for trak box
+        guard let trakData = findBoxData(in: data, boxType: "trak") else {
+            return nil
+        }
+
+        // Look for tkhd (track header) box within trak
+        guard let tkhdData = findBoxData(in: trakData, boxType: "tkhd") else {
+            return nil
+        }
+
+        // Parse tkhd box to get track dimensions
+        // tkhd box structure: version(1) + flags(3) + ... + width(4) + height(4)
+        guard tkhdData.count >= 84 else { return nil }
+
+        let width = tkhdData.subdata(in: 76 ..< 80).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let height = tkhdData.subdata(in: 80 ..< 84).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+
+        // Convert from fixed-point format (16.16) to integers
+        let widthInt = width >> 16
+        let heightInt = height >> 16
+
+        return (widthInt, heightInt)
     }
 }
 
@@ -89,64 +142,32 @@ private struct Mp4ImageInfo {
 
 // MARK: - Private Implementation
 
-private func validateMp4Format(data: Data) -> Bool {
-    guard data.count >= 8 else { return false }
-
-    let size = data.subdata(in: 0 ..< 4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    let type = String(data: data.subdata(in: 4 ..< 8), encoding: .ascii) ?? ""
-
+private func validateMp4Format(reader: Reader) async throws -> Bool {
+    let size = try await reader.readUInt32(offset: 0)
+    let type = try await reader.readString(offset: 4, length: 4)
     return size >= 8 && type == "ftyp"
 }
 
-private func findMoovBoxInHeader(headerData: Data, readAt: @escaping (UInt64, UInt32) async throws -> Data) async throws -> (UInt64, UInt32)? {
+private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
     var offset: UInt64 = 0
 
-    while true {
-        let data: Data
-        if offset + 8 <= headerData.count {
-            data = headerData.subdata(in: Int(offset) ..< Int(offset + 8))
-        } else {
-            data = try await readAt(offset, 8)
-        }
-
-        if data.count < 8 {
-            return nil
-        }
-
-        let boxSize = data.subdata(in: 0 ..< 4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let boxType = String(data: data.subdata(in: 4 ..< 8), encoding: .ascii) ?? ""
+    while offset < 100_000_000 { // Reasonable limit for moov box search
+        // Ensure we have header data
+        let boxSize = try await reader.readUInt32(offset: offset)
+        let boxType = try await reader.readString(offset: offset + 4, length: 4)
 
         if boxType == "moov" {
             return (offset, boxSize)
         }
 
         if boxSize <= 8 {
-            offset += 8 // 跳过无效box
+            offset += 8 // Skip invalid box
         } else {
             offset += UInt64(boxSize)
         }
     }
-}
 
-private func parseMoovBox(data: Data) -> [Mp4ImageInfo] {
-    logger.debug("Parsing moov box, size: \(data.count)")
-    var imageInfos: [Mp4ImageInfo] = []
-
-    // 尝试：moov/udta/meta/ilst
-    if let udtaData = findBoxData(in: data, boxType: "udta") {
-        logger.debug("Found udta box, size: \(udtaData.count)")
-        // 在udta box中查找meta box
-        if let metaData = findBoxData(in: udtaData, boxType: "meta") {
-            logger.debug("Found meta box in udta, size: \(metaData.count)")
-            // 在meta box中查找ilst box
-            if let ilstData = findBoxData(in: metaData, boxType: "ilst") {
-                logger.debug("Found ilst box in udta/meta, size: \(ilstData.count)")
-                imageInfos.append(contentsOf: parseIlstBox(data: ilstData))
-            }
-        }
-    }
-
-    return imageInfos
+    return nil
 }
 
 private func findBoxData(in data: Data, boxType: String) -> Data? {

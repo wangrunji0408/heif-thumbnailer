@@ -8,17 +8,17 @@ private let logger = Logger(label: "com.hdremote.SonyArwThumbnailer")
 // MARK: - SonyArwReader Implementation
 
 public class SonyArwReader: ImageReader {
-    private let readAt: (UInt64, UInt32) async throws -> Data
+    private let reader: Reader
     private var thumbnailEntries: [ThumbnailEntry]?
     private var metadata: Metadata?
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
-        self.readAt = readAt
+        reader = Reader(readAt: readAt)
     }
 
     public func getThumbnailList() async throws -> [ThumbnailInfo] {
         if thumbnailEntries == nil {
-            try await loadThumbnailEntries()
+            try await loadMetadata()
         }
 
         return thumbnailEntries?.map { entry in
@@ -34,7 +34,7 @@ public class SonyArwReader: ImageReader {
 
     public func getThumbnail(at index: Int) async throws -> Data {
         if thumbnailEntries == nil {
-            try await loadThumbnailEntries()
+            try await loadMetadata()
         }
 
         guard let entries = thumbnailEntries, index < entries.count else {
@@ -42,51 +42,195 @@ public class SonyArwReader: ImageReader {
         }
 
         let entry = entries[index]
-        return try await readAt(UInt64(entry.offset), entry.length)
+        return try await reader.readAt(offset: UInt64(entry.offset), length: entry.length)
     }
 
-    public func getMetadata() async throws -> Metadata? {
+    public func getMetadata() async throws -> Metadata {
         if metadata == nil {
             try await loadMetadata()
+        }
+        guard let metadata = metadata else {
+            throw ImageReaderError.invalidData
         }
         return metadata
     }
 
-    private func loadThumbnailEntries() async throws {
+    private func loadMetadata() async throws {
         // Read TIFF header and validate ARW format
-        let headerData = try await readAt(0, 65536)
-        guard let header = parseTiffHeader(headerData) else {
-            throw ImageReaderError.invalidData
-        }
+        try await reader.prefetch(offset: 0, length: 4096)
+        let ifdOffset = try await parseTiffHeader()
 
-        // Parse IFDs to find thumbnail entries
+        // Parse IFDs to find thumbnail entries and main image dimensions
         var entries: [ThumbnailEntry] = []
-        var currentIfdOffset = Int(header.ifdOffset)
+        var currentIfdOffset = ifdOffset
         var ifdIndex = 0
+        var mainImageWidth: UInt32 = 0
+        var mainImageHeight: UInt32 = 0
 
-        while currentIfdOffset > 0, currentIfdOffset < headerData.count, ifdIndex < 10 {
-            let nextIfdOffset = parseIFD(
-                headerData,
-                offset: currentIfdOffset,
-                byteOrder: header.byteOrder,
-                isThumbnail: ifdIndex > 0,
-                thumbnails: &entries
+        while currentIfdOffset > 0 && ifdIndex < 10 {
+            let nextIfdOffset = try await parseIFDForDataAndDimensions(
+                ifdOffset: currentIfdOffset,
+                entries: &entries,
+                mainWidth: &mainImageWidth,
+                mainHeight: &mainImageHeight,
+                ifdIndex: ifdIndex
             )
 
             currentIfdOffset = nextIfdOffset
             ifdIndex += 1
         }
 
+        // If we couldn't find main image dimensions, throw error
+        if mainImageWidth == 0 || mainImageHeight == 0 {
+            throw ImageReaderError.invalidData
+        }
+
         thumbnailEntries = entries
+        metadata = Metadata(width: mainImageWidth, height: mainImageHeight)
     }
 
-    private func loadMetadata() async throws {
-        // For ARW files, we can get metadata from the main image
-        if let entries = thumbnailEntries, let firstEntry = entries.first,
-           let width = firstEntry.width, let height = firstEntry.height
-        {
-            metadata = Metadata(width: width, height: height)
+    private func parseIFDForDataAndDimensions(
+        ifdOffset: UInt32,
+        entries: inout [ThumbnailEntry],
+        mainWidth: inout UInt32,
+        mainHeight: inout UInt32,
+        ifdIndex: Int
+    ) async throws -> UInt32 {
+        try await reader.prefetch(offset: UInt64(ifdOffset), length: 256)
+        let entryCount = try await reader.readUInt16(offset: UInt64(ifdOffset))
+
+        var thumbnailOffset: UInt32?
+        var thumbnailLength: UInt32?
+        var thumbnailWidth: UInt32?
+        var thumbnailHeight: UInt32?
+
+        for i in 0 ..< entryCount {
+            let entryOffset = UInt64(ifdOffset) + 2 + UInt64(i) * 12
+
+            let tag = try await reader.readUInt16(offset: entryOffset)
+            let type = try await reader.readUInt16(offset: entryOffset + 2)
+            // let count = try await reader.readUInt32(offset: entryOffset + 4)
+            let value = if type == 3 {
+                try UInt32(await reader.readUInt16(offset: entryOffset + 8))
+            } else {
+                try await reader.readUInt32(offset: entryOffset + 8)
+            }
+
+            switch tag {
+            case 0x0100: // ImageWidth
+                if ifdIndex == 0 { // Main image is in IFD0
+                    mainWidth = value
+                } else {
+                    thumbnailWidth = value
+                }
+
+            case 0x0101: // ImageHeight
+                if ifdIndex == 0 { // Main image is in IFD0
+                    mainHeight = value
+                } else {
+                    thumbnailHeight = value
+                }
+
+            case 0x0111: // StripOffsets or ThumbnailOffset
+                thumbnailOffset = value
+
+            case 0x0117: // StripByteCounts or ThumbnailLength
+                thumbnailLength = value
+
+            case 0x0201: // JPEGInterchangeFormat (thumbnail offset)
+                thumbnailOffset = value
+
+            case 0x0202: // JPEGInterchangeFormatLength (thumbnail length)
+                thumbnailLength = value
+
+            case 0x014A: // SubIFD
+                let subIfdOffset = value
+                let subIfdDimensions = try await parseSubIFDForDimensions(subIfdOffset: UInt64(subIfdOffset))
+                if ifdIndex == 0 {
+                    mainWidth = subIfdDimensions.width
+                    mainHeight = subIfdDimensions.height
+                } else {
+                    thumbnailWidth = subIfdDimensions.width
+                    thumbnailHeight = subIfdDimensions.height
+                }
+
+            default:
+                break
+            }
         }
+
+        // Add thumbnail entry if we found valid thumbnail data
+        if let thumbnailOffset = thumbnailOffset, let thumbnailLength = thumbnailLength {
+            let entry = ThumbnailEntry(
+                offset: thumbnailOffset,
+                length: thumbnailLength,
+                width: thumbnailWidth,
+                height: thumbnailHeight
+            )
+            entries.append(entry)
+            logger.debug("Found JPEG thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)")
+        }
+
+        // Read next IFD offset
+        let nextIfdOffsetLocation = UInt64(ifdOffset) + 2 + UInt64(entryCount) * 12
+        let nextIfdOffset = try await reader.readUInt32(offset: nextIfdOffsetLocation)
+
+        return nextIfdOffset
+    }
+
+    private func parseSubIFDForDimensions(subIfdOffset: UInt64) async throws -> (width: UInt32, height: UInt32) {
+        // Read SubIFD header
+        try await reader.prefetch(offset: subIfdOffset, length: 1024)
+        let entryCount = try await reader.readUInt16(offset: subIfdOffset)
+
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+
+        for i in 0 ..< Int(entryCount) {
+            let entryOffset = subIfdOffset + 2 + UInt64(i) * 12
+
+            let tag = try await reader.readUInt16(offset: entryOffset)
+            let type = try await reader.readUInt16(offset: entryOffset + 2)
+            // let count = try await reader.readUInt32(offset: entryOffset + 4)
+            let value = if type == 3 {
+                try UInt32(await reader.readUInt16(offset: entryOffset + 8))
+            } else {
+                try await reader.readUInt32(offset: entryOffset + 8)
+            }
+
+            switch tag {
+            case 0x0100: // ImageWidth
+                width = value
+            case 0x0101: // ImageHeight
+                height = value
+            default:
+                break
+            }
+        }
+
+        return (width, height)
+    }
+
+    private func parseTiffHeader() async throws -> UInt32 {
+        let data = try await reader.readAt(offset: 0, length: 2)
+        guard data.count >= 2 else { throw ImageReaderError.invalidData }
+
+        if data[0] == 0x49, data[1] == 0x49 { // "II" - Intel (little endian)
+            reader.setByteOrder(.littleEndian)
+        } else if data[0] == 0x4D, data[1] == 0x4D { // "MM" - Motorola (big endian)
+            reader.setByteOrder(.bigEndian)
+        } else {
+            throw ImageReaderError.invalidData
+        }
+
+        // Check magic number (42)
+        let magic = try await reader.readUInt16(offset: 2)
+        guard magic == 42 else { throw ImageReaderError.invalidData }
+
+        // Get IFD offset
+        let ifdOffset = try await reader.readUInt32(offset: 4)
+
+        return ifdOffset
     }
 }
 
@@ -97,157 +241,4 @@ private struct ThumbnailEntry {
     let length: UInt32
     let width: UInt32?
     let height: UInt32?
-}
-
-private struct TiffHeader {
-    let byteOrder: ByteOrder
-    let ifdOffset: UInt32
-}
-
-private enum ByteOrder {
-    case bigEndian
-    case littleEndian
-}
-
-// MARK: - TIFF Header Parsing
-
-private func parseTiffHeader(_ data: Data) -> TiffHeader? {
-    guard data.count >= 8 else { return nil }
-
-    // Check byte order
-    let byteOrder: ByteOrder
-    if data[0] == 0x49, data[1] == 0x49 { // "II" - Intel (little endian)
-        byteOrder = .littleEndian
-    } else if data[0] == 0x4D, data[1] == 0x4D { // "MM" - Motorola (big endian)
-        byteOrder = .bigEndian
-    } else {
-        return nil
-    }
-
-    // Check magic number (42)
-    let magic = readUInt16(data, offset: 2, byteOrder: byteOrder)
-    guard magic == 42 else { return nil }
-
-    // Get IFD offset
-    let ifdOffset = readUInt32(data, offset: 4, byteOrder: byteOrder)
-
-    return TiffHeader(byteOrder: byteOrder, ifdOffset: ifdOffset)
-}
-
-// MARK: - IFD Parsing
-
-private func parseIFD(
-    _ data: Data,
-    offset: Int,
-    byteOrder: ByteOrder,
-    isThumbnail _: Bool = false,
-    thumbnails: inout [ThumbnailEntry]
-) -> Int {
-    guard offset + 2 <= data.count else { return 0 }
-
-    let entryCount = readUInt16(data, offset: offset, byteOrder: byteOrder)
-    let entriesStart = offset + 2
-    let entriesEnd = entriesStart + Int(entryCount) * 12
-
-    guard entriesEnd <= data.count else { return 0 }
-
-    var thumbnailOffset: UInt32?
-    var thumbnailLength: UInt32?
-    var imageWidth: UInt32?
-    var imageHeight: UInt32?
-    var jpegInterchangeFormat: UInt32?
-    var jpegInterchangeFormatLength: UInt32?
-
-    // Parse directory entries
-    for i in 0 ..< entryCount {
-        let entryOffset = entriesStart + Int(i) * 12
-        let tag = readUInt16(data, offset: entryOffset, byteOrder: byteOrder)
-        let type = readUInt16(data, offset: entryOffset + 2, byteOrder: byteOrder)
-        let count = readUInt32(data, offset: entryOffset + 4, byteOrder: byteOrder)
-        let valueOffset = entryOffset + 8
-
-        switch tag {
-        case 0x0100: // ImageWidth
-            imageWidth = readTagValue(data, offset: valueOffset, type: type, count: count, byteOrder: byteOrder)
-        case 0x0101: // ImageHeight
-            imageHeight = readTagValue(data, offset: valueOffset, type: type, count: count, byteOrder: byteOrder)
-        case 0x0111: // StripOffsets
-            thumbnailOffset = readTagValue(data, offset: valueOffset, type: type, count: count, byteOrder: byteOrder)
-        case 0x0117: // StripByteCounts
-            thumbnailLength = readTagValue(data, offset: valueOffset, type: type, count: count, byteOrder: byteOrder)
-        case 0x0201: // JPEGInterchangeFormat (thumbnail offset)
-            jpegInterchangeFormat = readTagValue(data, offset: valueOffset, type: type, count: count, byteOrder: byteOrder)
-        case 0x0202: // JPEGInterchangeFormatLength (thumbnail length)
-            jpegInterchangeFormatLength = readTagValue(data, offset: valueOffset, type: type, count: count, byteOrder: byteOrder)
-        default:
-            break
-        }
-    }
-
-    // Add thumbnail entries
-    if let offset = jpegInterchangeFormat, let length = jpegInterchangeFormatLength {
-        thumbnails.append(ThumbnailEntry(
-            offset: offset,
-            length: length,
-            width: imageWidth,
-            height: imageHeight
-        ))
-        logger.debug("Found JPEG thumbnail: offset=\(offset), length=\(length)")
-    } else if let offset = thumbnailOffset, let length = thumbnailLength {
-        thumbnails.append(ThumbnailEntry(
-            offset: offset,
-            length: length,
-            width: imageWidth,
-            height: imageHeight
-        ))
-        logger.debug("Found strip thumbnail: offset=\(offset), length=\(length)")
-    }
-
-    // Get next IFD offset
-    let nextIfdOffset = readUInt32(data, offset: entriesEnd, byteOrder: byteOrder)
-    return nextIfdOffset > 0 ? Int(nextIfdOffset) : 0
-}
-
-// MARK: - Utility Functions
-
-private func readUInt16(_ data: Data, offset: Int, byteOrder: ByteOrder) -> UInt16 {
-    guard offset + 2 <= data.count else { return 0 }
-
-    let bytes = data.subdata(in: offset ..< offset + 2)
-    switch byteOrder {
-    case .littleEndian:
-        return bytes.withUnsafeBytes { $0.load(as: UInt16.self) }
-    case .bigEndian:
-        return bytes.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-    }
-}
-
-private func readUInt32(_ data: Data, offset: Int, byteOrder: ByteOrder) -> UInt32 {
-    guard offset + 4 <= data.count else { return 0 }
-
-    let bytes = data.subdata(in: offset ..< offset + 4)
-    switch byteOrder {
-    case .littleEndian:
-        return bytes.withUnsafeBytes { $0.load(as: UInt32.self) }
-    case .bigEndian:
-        return bytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    }
-}
-
-private func readTagValue(_ data: Data, offset: Int, type: UInt16, count: UInt32, byteOrder: ByteOrder) -> UInt32? {
-    // Handle different TIFF data types
-    switch type {
-    case 3: // SHORT
-        if count == 1 {
-            return UInt32(readUInt16(data, offset: offset, byteOrder: byteOrder))
-        }
-    case 4: // LONG
-        if count == 1 {
-            return readUInt32(data, offset: offset, byteOrder: byteOrder)
-        }
-    default:
-        break
-    }
-
-    return nil
 }
