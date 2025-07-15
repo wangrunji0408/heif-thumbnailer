@@ -4,37 +4,19 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:HeifThumbnailer}",
-            "name": "Debug HEICThumbnailCLI",
-            "program": "${workspaceFolder:HeifThumbnailer}/.build/debug/HEICThumbnailCLI",
-            "preLaunchTask": "swift: Build Debug HEICThumbnailCLI"
+            "cwd": "${workspaceFolder:image-thumbnailer}",
+            "name": "Debug ImageThumbnailerCLI",
+            "program": "${workspaceFolder:image-thumbnailer}/.build/debug/ImageThumbnailerCLI",
+            "preLaunchTask": "swift: Build Debug ImageThumbnailerCLI"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:HeifThumbnailer}",
-            "name": "Release HEICThumbnailCLI",
-            "program": "${workspaceFolder:HeifThumbnailer}/.build/release/HEICThumbnailCLI",
-            "preLaunchTask": "swift: Build Release HEICThumbnailCLI"
-        },
-        {
-            "type": "swift",
-            "request": "launch",
-            "args": [],
-            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
-            "name": "Debug HeifThumbnailerCLI",
-            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/debug/HeifThumbnailerCLI",
-            "preLaunchTask": "swift: Build Debug HeifThumbnailerCLI"
-        },
-        {
-            "type": "swift",
-            "request": "launch",
-            "args": [],
-            "cwd": "${workspaceFolder:HEICThumbnailExtractor}",
-            "name": "Release HeifThumbnailerCLI",
-            "program": "${workspaceFolder:HEICThumbnailExtractor}/.build/release/HeifThumbnailerCLI",
-            "preLaunchTask": "swift: Build Release HeifThumbnailerCLI"
+            "cwd": "${workspaceFolder:image-thumbnailer}",
+            "name": "Release ImageThumbnailerCLI",
+            "program": "${workspaceFolder:image-thumbnailer}/.build/release/ImageThumbnailerCLI",
+            "preLaunchTask": "swift: Build Release ImageThumbnailerCLI"
         }
     ]
 }
