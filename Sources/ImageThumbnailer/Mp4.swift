@@ -160,7 +160,7 @@ private func validateMp4Format(reader: Reader) async throws -> Bool {
 private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
     var offset: UInt64 = 0
 
-    while offset < 100_000_000 {  // Reasonable limit for moov box search
+    while true {
         // Ensure we have header data
         let boxSize = try await reader.readUInt32(at: offset)
         let boxType = try await reader.readString(at: offset + 4, length: 4)
@@ -175,8 +175,6 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
             offset += UInt64(boxSize)
         }
     }
-
-    return nil
 }
 
 private func findBoxData(in data: Data, boxType: String) -> Data? {
