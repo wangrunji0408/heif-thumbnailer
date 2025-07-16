@@ -1,8 +1,8 @@
 import CoreGraphics
 import Foundation
 import ImageIO
-import Logging
 import UniformTypeIdentifiers
+import os.log
 
 #if canImport(UIKit)
     import UIKit
@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
     import AppKit
 #endif
 
-private let logger = Logger(label: "com.hdremote.JpegThumbnailer")
+private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "JpegReader")
 
 // MARK: - JpegReader Implementation
 
@@ -18,7 +18,7 @@ public class JpegReader: ImageReader {
     private let reader: Reader
     private var thumbnailEntries: [ThumbnailEntry]?
     private var metadata: Metadata?
-    private var imageOrientation: UInt16? // 存储主图像的 orientation
+    private var imageOrientation: UInt16?  // 存储主图像的 orientation
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
         reader = Reader(readAt: readAt)
@@ -60,8 +60,12 @@ public class JpegReader: ImageReader {
         let (rotation, flip) = orientationToRotation(orientation)
 
         if rotation != 0 || flip {
-            logger.debug("Applying orientation correction: orientation=\(orientation), rotation=\(rotation), flip=\(flip)")
-            if let correctedData = applyOrientationCorrection(to: thumbnailData, rotation: rotation, flip: flip) {
+            logger.debug(
+                "Applying orientation correction: orientation=\(orientation), rotation=\(rotation), flip=\(flip)"
+            )
+            if let correctedData = applyOrientationCorrection(
+                to: thumbnailData, rotation: rotation, flip: flip)
+            {
                 return correctedData
             } else {
                 logger.warning("Failed to apply orientation correction, returning original data")
@@ -119,7 +123,7 @@ public class JpegReader: ImageReader {
     }
 
     private func extractExifData() async throws -> (UInt64, UInt32)? {
-        var offset: UInt64 = 2 // Skip JPEG SOI marker
+        var offset: UInt64 = 2  // Skip JPEG SOI marker
 
         // Search for EXIF segment (APP1 with EXIF identifier)
         while offset < 65536 {
@@ -129,12 +133,12 @@ public class JpegReader: ImageReader {
             let markerType = UInt8(marker & 0xFF)
             let segmentLength = try await reader.readUInt16(at: offset + 2)
 
-            if markerType == 0xE1 { // APP1 segment
+            if markerType == 0xE1 {  // APP1 segment
                 let header = try await reader.readString(at: UInt64(offset + 4), length: 4)
                 if header == "Exif" {
                     logger.debug("Found EXIF data at offset \(offset + 4)")
-                    let exifOffset = offset + 10 // offset + 4 (segment header) + 6 (Exif\0\0)
-                    let exifLength = UInt32(segmentLength - 6) // Skip "Exif\0\0"
+                    let exifOffset = offset + 10  // offset + 4 (segment header) + 6 (Exif\0\0)
+                    let exifLength = UInt32(segmentLength - 6)  // Skip "Exif\0\0"
                     return (exifOffset, exifLength)
                 }
             }
@@ -149,9 +153,9 @@ public class JpegReader: ImageReader {
     private func parseTiffHeader(at offset: UInt64) async throws -> UInt32 {
         // Check byte order
         let byteOrderData = try await reader.read(at: offset, length: 2)
-        if byteOrderData[0] == 0x49, byteOrderData[1] == 0x49 { // "II" - Intel (little endian)
+        if byteOrderData[0] == 0x49, byteOrderData[1] == 0x49 {  // "II" - Intel (little endian)
             reader.setByteOrder(.littleEndian)
-        } else if byteOrderData[0] == 0x4D, byteOrderData[1] == 0x4D { // "MM" - Motorola (big endian)
+        } else if byteOrderData[0] == 0x4D, byteOrderData[1] == 0x4D {  // "MM" - Motorola (big endian)
             reader.setByteOrder(.bigEndian)
         } else {
             throw ImageReaderError.invalidData
@@ -176,7 +180,7 @@ public class JpegReader: ImageReader {
         let absoluteIfdOffset = exifOffset + ifdOffset
 
         let entryCount = try await reader.readUInt16(at: absoluteIfdOffset)
-        let entriesDataLength = UInt32(entryCount * 12 + 4) // 12 bytes per entry + 4 bytes for next IFD offset
+        let entriesDataLength = UInt32(entryCount * 12 + 4)  // 12 bytes per entry + 4 bytes for next IFD offset
 
         // Prefetch all IFD entries for dense reading
         try await reader.prefetch(at: absoluteIfdOffset, length: entriesDataLength)
@@ -188,39 +192,42 @@ public class JpegReader: ImageReader {
         var thumbnailWidth: UInt32?
         var thumbnailHeight: UInt32?
 
-        logger.debug("Parsing IFD at offset \(ifdOffset), isThumbnail: \(isThumbnail), entryCount: \(entryCount)")
+        logger.debug(
+            "Parsing IFD at offset \(ifdOffset), isThumbnail: \(isThumbnail), entryCount: \(entryCount)"
+        )
 
         // Parse directory entries
-        for _ in 0 ..< entryCount {
+        for _ in 0..<entryCount {
             let tag = try await reader.readUInt16(at: currentOffset)
             let type = try await reader.readUInt16(at: currentOffset + 2)
-            let _ = try await reader.readUInt32(at: currentOffset + 4) // count
-            let value = if type == 3 {
-                try UInt32(await reader.readUInt16(at: currentOffset + 8))
-            } else {
-                try await reader.readUInt32(at: currentOffset + 8)
-            }
+            let _ = try await reader.readUInt32(at: currentOffset + 4)  // count
+            let value =
+                if type == 3 {
+                    try UInt32(await reader.readUInt16(at: currentOffset + 8))
+                } else {
+                    try await reader.readUInt32(at: currentOffset + 8)
+                }
 
             if isThumbnail {
                 switch tag {
-                case 0x0201: // JPEGInterchangeFormat (thumbnail offset)
+                case 0x0201:  // JPEGInterchangeFormat (thumbnail offset)
                     thumbnailOffset = value
-                case 0x0202: // JPEGInterchangeFormatLength (thumbnail length)
+                case 0x0202:  // JPEGInterchangeFormatLength (thumbnail length)
                     thumbnailLength = value
-                case 0x0100: // ImageWidth
+                case 0x0100:  // ImageWidth
                     thumbnailWidth = value
-                case 0x0101: // ImageLength (Height)
+                case 0x0101:  // ImageLength (Height)
                     thumbnailHeight = value
                 default:
                     break
                 }
             } else {
                 switch tag {
-                case 0x8769: // ExifIFD
+                case 0x8769:  // ExifIFD
                     metadata = try await parseExifIFD(at: exifOffset + UInt64(value))
-                case 0x0112: // Orientation
+                case 0x0112:  // Orientation
                     imageOrientation = UInt16(value)
-                    logger.debug("Found main image orientation: \(imageOrientation ?? 0)")
+                    logger.debug("Found main image orientation: \(self.imageOrientation ?? 0)")
                 default:
                     break
                 }
@@ -240,7 +247,9 @@ public class JpegReader: ImageReader {
                 height: thumbnailHeight,
             )
             entries.append(entry)
-            logger.debug("Found thumbnail: relativeOffset=\(relativeOffset), absoluteOffset=\(absoluteOffset), length=\(length), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)")
+            logger.debug(
+                "Found thumbnail: relativeOffset=\(relativeOffset), absoluteOffset=\(absoluteOffset), length=\(length), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)"
+            )
         }
 
         // Read next IFD offset
@@ -256,22 +265,23 @@ public class JpegReader: ImageReader {
         var width: UInt32 = 0
         var height: UInt32 = 0
 
-        for i in 0 ..< Int(entryCount) {
+        for i in 0..<Int(entryCount) {
             let entryOffset = offset + 2 + UInt64(i) * 12
 
             let tag = try await reader.readUInt16(at: entryOffset)
             let type = try await reader.readUInt16(at: entryOffset + 2)
             // let count = try await reader.readUInt32(offset: entryOffset + 4)
-            let value = if type == 3 {
-                try UInt32(await reader.readUInt16(at: entryOffset + 8))
-            } else {
-                try await reader.readUInt32(at: entryOffset + 8)
-            }
+            let value =
+                if type == 3 {
+                    try UInt32(await reader.readUInt16(at: entryOffset + 8))
+                } else {
+                    try await reader.readUInt32(at: entryOffset + 8)
+                }
 
             switch tag {
-            case 0xA002: // ExifImageWidth
+            case 0xA002:  // ExifImageWidth
                 width = value
-            case 0xA003: // ExifImageHeight
+            case 0xA003:  // ExifImageHeight
                 height = value
             default:
                 break
@@ -282,10 +292,10 @@ public class JpegReader: ImageReader {
     }
 
     private func extractMPFThumbnails() async throws -> [ThumbnailEntry] {
-        var offset: UInt64 = 2 // Skip JPEG SOI marker
+        var offset: UInt64 = 2  // Skip JPEG SOI marker
 
         // Search for APP2 segments that contain MPF data
-        while offset < 1_048_576 { // 1MB search range
+        while offset < 1_048_576 {  // 1MB search range
             try await reader.prefetch(at: offset, length: 256)
             guard try await reader.readUInt8(at: offset) == 0xFF else {
                 break
@@ -294,14 +304,17 @@ public class JpegReader: ImageReader {
             let markerType = try await reader.readUInt8(at: offset + 1)
             let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
 
-            if markerType == 0xE2 { // APP2 segment
+            if markerType == 0xE2 {  // APP2 segment
                 let header = try await reader.readString(at: offset + 4, length: 4)
 
                 // Check for MPF data - MPF format starts with "MPF\0" or directly with TIFF header
                 if header == "MPF\0" || header == "MPF " {
-                    logger.debug("Found MPF data in APP2 segment at offset \(offset + 4), segment size: \(segmentLength - 2)")
+                    logger.debug(
+                        "Found MPF data in APP2 segment at offset \(offset + 4), segment size: \(segmentLength - 2)"
+                    )
                     let mpfOffset = offset + 4
-                    let mpfEntries = try await parseMPFData(mpfOffset: mpfOffset, mpfLength: UInt32(segmentLength - 2))
+                    let mpfEntries = try await parseMPFData(
+                        mpfOffset: mpfOffset, mpfLength: UInt32(segmentLength - 2))
                     logger.debug("MPF parsing returned \(mpfEntries.count) entries")
                     return mpfEntries
                 }
@@ -314,7 +327,8 @@ public class JpegReader: ImageReader {
         return []
     }
 
-    private func parseMPFData(mpfOffset: UInt64, mpfLength: UInt32) async throws -> [ThumbnailEntry] {
+    private func parseMPFData(mpfOffset: UInt64, mpfLength: UInt32) async throws -> [ThumbnailEntry]
+    {
         var thumbnails: [ThumbnailEntry] = []
         guard mpfLength >= 12 else {
             logger.debug("MPF data too small: \(mpfLength) bytes")
@@ -325,9 +339,10 @@ public class JpegReader: ImageReader {
         try await reader.prefetch(at: mpfOffset, length: mpfLength)
 
         // Parse MPF header
-        let tiffDataOffset = mpfOffset + 4 // Skip "MPF\0" or "MPF "
+        let tiffDataOffset = mpfOffset + 4  // Skip "MPF\0" or "MPF "
 
-        logger.debug("MPF data size: \(mpfLength) bytes, TIFF data starts at offset \(tiffDataOffset)")
+        logger.debug(
+            "MPF data size: \(mpfLength) bytes, TIFF data starts at offset \(tiffDataOffset)")
 
         // Parse TIFF header within MPF
         let ifdOffset = try await parseTiffHeader(at: tiffDataOffset)
@@ -336,7 +351,7 @@ public class JpegReader: ImageReader {
         let mpIndexIFDOffset = tiffDataOffset + UInt64(ifdOffset)
 
         let entryCount = try await reader.readUInt16(at: mpIndexIFDOffset)
-        let entriesDataLength = UInt32(entryCount * 12 + 4) // 12 bytes per entry + 4 bytes for next IFD offset
+        let entriesDataLength = UInt32(entryCount * 12 + 4)  // 12 bytes per entry + 4 bytes for next IFD offset
 
         // Prefetch all IFD entries for dense reading
         try await reader.prefetch(at: mpIndexIFDOffset, length: entriesDataLength)
@@ -349,30 +364,31 @@ public class JpegReader: ImageReader {
         var mpEntryOffset: UInt64 = 0
 
         // Parse MP Index IFD entries
-        for _ in 0 ..< entryCount {
+        for _ in 0..<entryCount {
             let tag = try await reader.readUInt16(at: currentOffset)
             let type = try await reader.readUInt16(at: currentOffset + 2)
             let count = try await reader.readUInt32(at: currentOffset + 4)
             let valueOffset = try await reader.readUInt32(at: currentOffset + 8)
 
             switch tag {
-            case 0xB000: // MP Format Version
+            case 0xB000:  // MP Format Version
                 logger.debug("MP Format Version found")
-            case 0xB001: // Number of Images
+            case 0xB001:  // Number of Images
                 numberOfImages = valueOffset
                 logger.debug("Number of Images: \(numberOfImages)")
-            case 0xB002: // MP Entry
-                if type == 7, count > 0 { // UNDEFINED type with count > 0
+            case 0xB002:  // MP Entry
+                if type == 7, count > 0 {  // UNDEFINED type with count > 0
                     // MP Entry data location depends on the count
                     if count <= 4 {
                         // Data is stored directly in the valueOffset field
-                        mpEntryOffset = currentOffset + 8 // Point to the valueOffset field itself
+                        mpEntryOffset = currentOffset + 8  // Point to the valueOffset field itself
                     } else {
                         // Data is stored at the offset pointed by valueOffset
                         // The offset is relative to the start of the TIFF header
                         mpEntryOffset = tiffDataOffset + UInt64(valueOffset)
                     }
-                    logger.debug("MP Entry offset: \(mpEntryOffset), count: \(count), type: \(type)")
+                    logger.debug(
+                        "MP Entry offset: \(mpEntryOffset), count: \(count), type: \(type)")
                 }
             default:
                 break
@@ -410,19 +426,21 @@ public class JpegReader: ImageReader {
         // Parse all MP entries
         var tempOffset = entryOffset
 
-        for i in 0 ..< numberOfImages {
+        for i in 0..<numberOfImages {
             let imageAttributes = try await reader.readUInt32(at: tempOffset)
             let imageSize = try await reader.readUInt32(at: tempOffset + 4)
             let imageOffset = try await reader.readUInt32(at: tempOffset + 8)
-            let _ = try await reader.readUInt16(at: tempOffset + 12) // dependent1
-            let _ = try await reader.readUInt16(at: tempOffset + 14) // dependent2
+            let _ = try await reader.readUInt16(at: tempOffset + 12)  // dependent1
+            let _ = try await reader.readUInt16(at: tempOffset + 14)  // dependent2
 
             // Extract flags, format, and type from imageAttributes
             let flags = (imageAttributes & 0xF800_0000) >> 27
             let format = (imageAttributes & 0x0700_0000) >> 24
             let type = imageAttributes & 0x00FF_FFFF
 
-            logger.debug("MP Entry \(i): flags=0x\(String(flags, radix: 16)), format=\(format), type=0x\(String(type, radix: 16)), size=\(imageSize), offset=\(imageOffset)")
+            logger.debug(
+                "MP Entry \(i): flags=0x\(String(flags, radix: 16)), format=\(format), type=0x\(String(type, radix: 16)), size=\(imageSize), offset=\(imageOffset)"
+            )
 
             // Process entry to create thumbnail
             // Skip invalid entries
@@ -435,15 +453,15 @@ public class JpegReader: ImageReader {
             // Determine if this is a preview/thumbnail image
             let isPreview: Bool
             switch type {
-            case 0x010001 ... 0x010005: // Large Thumbnails
+            case 0x010001...0x010005:  // Large Thumbnails
                 isPreview = true
-            case 0x020001 ... 0x020003: // Multi-frame images
+            case 0x020001...0x020003:  // Multi-frame images
                 isPreview = true
-            case 0x040000: // Original Preservation Image
+            case 0x040000:  // Original Preservation Image
                 isPreview = true
-            case 0x050000: // Gain Map Image
+            case 0x050000:  // Gain Map Image
                 isPreview = true
-            case 0x030000: // Baseline MP Primary Image
+            case 0x030000:  // Baseline MP Primary Image
                 isPreview = false
             default:
                 // Check if it's a large thumbnail type (0x01xxxx)
@@ -474,11 +492,13 @@ public class JpegReader: ImageReader {
             let thumbnailEntry = ThumbnailEntry(
                 offset: absoluteOffset,
                 length: imageSize,
-                width: nil, // MPF doesn't provide dimensions in header
+                width: nil,  // MPF doesn't provide dimensions in header
                 height: nil,
             )
             thumbnails.append(thumbnailEntry)
-            logger.debug("Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), type=0x\(String(type, radix: 16))")
+            logger.debug(
+                "Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), type=0x\(String(type, radix: 16))"
+            )
 
             tempOffset += 16
         }
@@ -509,7 +529,7 @@ func applyOrientationCorrection(to thumbnailData: Data, rotation: Int, flip: Boo
 
     // Create CGImage from thumbnail data
     guard let imageSource = CGImageSourceCreateWithData(thumbnailData as CFData, nil),
-          let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+        let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
     else {
         logger.error("Failed to create CGImage from thumbnail data")
         return nil
@@ -520,7 +540,8 @@ func applyOrientationCorrection(to thumbnailData: Data, rotation: Int, flip: Boo
 
     // Convert back to JPEG data
     guard let mutableData = CFDataCreateMutable(nil, 0),
-          let destination = CGImageDestinationCreateWithData(mutableData, UTType.jpeg.identifier as CFString, 1, nil)
+        let destination = CGImageDestinationCreateWithData(
+            mutableData, UTType.jpeg.identifier as CFString, 1, nil)
     else {
         logger.error("Failed to create image destination")
         return nil
@@ -528,7 +549,7 @@ func applyOrientationCorrection(to thumbnailData: Data, rotation: Int, flip: Boo
 
     // Set JPEG compression quality
     let options: [CFString: Any] = [
-        kCGImageDestinationLossyCompressionQuality: 0.9,
+        kCGImageDestinationLossyCompressionQuality: 0.9
     ]
 
     CGImageDestinationAddImage(destination, rotatedImage, options as CFDictionary)
@@ -551,11 +572,11 @@ private func rotateCGImage(_ image: CGImage, by degrees: Int, flip: Bool) -> CGI
         (normalizedDegrees == 90 || normalizedDegrees == 270) ? (height, width) : (width, height)
 
     guard let colorSpace = image.colorSpace,
-          let context = CGContext(
-              data: nil, width: newWidth, height: newHeight,
-              bitsPerComponent: image.bitsPerComponent, bytesPerRow: 0,
-              space: colorSpace, bitmapInfo: image.bitmapInfo.rawValue
-          )
+        let context = CGContext(
+            data: nil, width: newWidth, height: newHeight,
+            bitsPerComponent: image.bitsPerComponent, bytesPerRow: 0,
+            space: colorSpace, bitmapInfo: image.bitmapInfo.rawValue
+        )
     else {
         return image
     }
@@ -573,23 +594,23 @@ private func rotateCGImage(_ image: CGImage, by degrees: Int, flip: Bool) -> CGI
 
 private func orientationToRotation(_ orientation: UInt16) -> (Int, Bool) {
     switch orientation {
-    case 1: return (0, false) // Normal
-    case 2: return (0, true) // Mirror horizontal (no rotation, just flip)
-    case 3: return (180, false) // Rotate 180°
-    case 4: return (180, true) // Mirror vertical (180° + flip)
-    case 5: return (270, true) // Mirror horizontal and rotate 270° CW
-    case 6: return (90, false) // Rotate 90° CW
-    case 7: return (90, true) // Mirror horizontal and rotate 90° CW
-    case 8: return (270, false) // Rotate 270° CW
-    default: return (0, false) // Unknown orientation, default to normal
+    case 1: return (0, false)  // Normal
+    case 2: return (0, true)  // Mirror horizontal (no rotation, just flip)
+    case 3: return (180, false)  // Rotate 180°
+    case 4: return (180, true)  // Mirror vertical (180° + flip)
+    case 5: return (270, true)  // Mirror horizontal and rotate 270° CW
+    case 6: return (90, false)  // Rotate 90° CW
+    case 7: return (90, true)  // Mirror horizontal and rotate 90° CW
+    case 8: return (270, false)  // Rotate 270° CW
+    default: return (0, false)  // Unknown orientation, default to normal
     }
 }
 
 private func getThumbnailDimensions(_ data: Data) -> (width: UInt32, height: UInt32) {
     guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-          let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
-          let width = properties[kCGImagePropertyPixelWidth as String] as? NSNumber,
-          let height = properties[kCGImagePropertyPixelHeight as String] as? NSNumber
+        let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+        let width = properties[kCGImagePropertyPixelWidth as String] as? NSNumber,
+        let height = properties[kCGImagePropertyPixelHeight as String] as? NSNumber
     else {
         return (0, 0)
     }

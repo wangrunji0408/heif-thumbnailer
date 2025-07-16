@@ -19,3 +19,9 @@ public struct Metadata {
     public let width: UInt32
     public let height: UInt32
 }
+
+public enum ImageReaderError: Error {
+    case indexOutOfBounds
+    case invalidData
+    case unsupportedFormat
+}

@@ -1,9 +1,9 @@
 import CoreGraphics
 import Foundation
 import ImageIO
-import Logging
+import os.log
 
-private let logger = Logger(label: "com.hdremote.SonyArwThumbnailer")
+private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "SonyArwReader")
 
 // MARK: - SonyArwReader Implementation
 
@@ -104,48 +104,50 @@ public class SonyArwReader: ImageReader {
         var thumbnailWidth: UInt32?
         var thumbnailHeight: UInt32?
 
-        for i in 0 ..< entryCount {
+        for i in 0..<entryCount {
             let entryOffset = UInt64(ifdOffset) + 2 + UInt64(i) * 12
 
             let tag = try await reader.readUInt16(at: entryOffset)
             let type = try await reader.readUInt16(at: entryOffset + 2)
             // let count = try await reader.readUInt32(offset: entryOffset + 4)
-            let value = if type == 3 {
-                try UInt32(await reader.readUInt16(at: entryOffset + 8))
-            } else {
-                try await reader.readUInt32(at: entryOffset + 8)
-            }
+            let value =
+                if type == 3 {
+                    try UInt32(await reader.readUInt16(at: entryOffset + 8))
+                } else {
+                    try await reader.readUInt32(at: entryOffset + 8)
+                }
 
             switch tag {
-            case 0x0100: // ImageWidth
-                if ifdIndex == 0 { // Main image is in IFD0
+            case 0x0100:  // ImageWidth
+                if ifdIndex == 0 {  // Main image is in IFD0
                     mainWidth = value
                 } else {
                     thumbnailWidth = value
                 }
 
-            case 0x0101: // ImageHeight
-                if ifdIndex == 0 { // Main image is in IFD0
+            case 0x0101:  // ImageHeight
+                if ifdIndex == 0 {  // Main image is in IFD0
                     mainHeight = value
                 } else {
                     thumbnailHeight = value
                 }
 
-            case 0x0111: // StripOffsets or ThumbnailOffset
+            case 0x0111:  // StripOffsets or ThumbnailOffset
                 thumbnailOffset = value
 
-            case 0x0117: // StripByteCounts or ThumbnailLength
+            case 0x0117:  // StripByteCounts or ThumbnailLength
                 thumbnailLength = value
 
-            case 0x0201: // JPEGInterchangeFormat (thumbnail offset)
+            case 0x0201:  // JPEGInterchangeFormat (thumbnail offset)
                 thumbnailOffset = value
 
-            case 0x0202: // JPEGInterchangeFormatLength (thumbnail length)
+            case 0x0202:  // JPEGInterchangeFormatLength (thumbnail length)
                 thumbnailLength = value
 
-            case 0x014A: // SubIFD
+            case 0x014A:  // SubIFD
                 let subIfdOffset = value
-                let subIfdDimensions = try await parseSubIFDForDimensions(subIfdOffset: UInt64(subIfdOffset))
+                let subIfdDimensions = try await parseSubIFDForDimensions(
+                    subIfdOffset: UInt64(subIfdOffset))
                 if ifdIndex == 0 {
                     mainWidth = subIfdDimensions.width
                     mainHeight = subIfdDimensions.height
@@ -168,7 +170,9 @@ public class SonyArwReader: ImageReader {
                 height: thumbnailHeight
             )
             entries.append(entry)
-            logger.debug("Found JPEG thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)")
+            logger.debug(
+                "Found JPEG thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)"
+            )
         }
 
         // Read next IFD offset
@@ -178,7 +182,9 @@ public class SonyArwReader: ImageReader {
         return nextIfdOffset
     }
 
-    private func parseSubIFDForDimensions(subIfdOffset: UInt64) async throws -> (width: UInt32, height: UInt32) {
+    private func parseSubIFDForDimensions(subIfdOffset: UInt64) async throws -> (
+        width: UInt32, height: UInt32
+    ) {
         // Read SubIFD header
         try await reader.prefetch(at: subIfdOffset, length: 1024)
         let entryCount = try await reader.readUInt16(at: subIfdOffset)
@@ -186,22 +192,23 @@ public class SonyArwReader: ImageReader {
         var width: UInt32 = 0
         var height: UInt32 = 0
 
-        for i in 0 ..< Int(entryCount) {
+        for i in 0..<Int(entryCount) {
             let entryOffset = subIfdOffset + 2 + UInt64(i) * 12
 
             let tag = try await reader.readUInt16(at: entryOffset)
             let type = try await reader.readUInt16(at: entryOffset + 2)
             // let count = try await reader.readUInt32(offset: entryOffset + 4)
-            let value = if type == 3 {
-                try UInt32(await reader.readUInt16(at: entryOffset + 8))
-            } else {
-                try await reader.readUInt32(at: entryOffset + 8)
-            }
+            let value =
+                if type == 3 {
+                    try UInt32(await reader.readUInt16(at: entryOffset + 8))
+                } else {
+                    try await reader.readUInt32(at: entryOffset + 8)
+                }
 
             switch tag {
-            case 0x0100: // ImageWidth
+            case 0x0100:  // ImageWidth
                 width = value
-            case 0x0101: // ImageHeight
+            case 0x0101:  // ImageHeight
                 height = value
             default:
                 break
@@ -215,9 +222,9 @@ public class SonyArwReader: ImageReader {
         let data = try await reader.read(at: 0, length: 2)
         guard data.count >= 2 else { throw ImageReaderError.invalidData }
 
-        if data[0] == 0x49, data[1] == 0x49 { // "II" - Intel (little endian)
+        if data[0] == 0x49, data[1] == 0x49 {  // "II" - Intel (little endian)
             reader.setByteOrder(.littleEndian)
-        } else if data[0] == 0x4D, data[1] == 0x4D { // "MM" - Motorola (big endian)
+        } else if data[0] == 0x4D, data[1] == 0x4D {  // "MM" - Motorola (big endian)
             reader.setByteOrder(.bigEndian)
         } else {
             throw ImageReaderError.invalidData

@@ -1,7 +1,7 @@
 import Foundation
-import Logging
+import os.log
 
-private let logger = Logger(label: "com.hdremote.Mp4Thumbnailer")
+private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "Mp4Reader")
 
 // MARK: - Mp4Reader Implementation
 
@@ -47,6 +47,7 @@ public class Mp4Reader: ImageReader {
             try await loadMetadata()
         }
         guard let metadata = metadata else {
+            logger.error("Metadata not found")
             throw ImageReaderError.invalidData
         }
         return metadata
@@ -58,11 +59,13 @@ public class Mp4Reader: ImageReader {
 
         // Validate MP4 format
         guard try await validateMp4Format(reader: reader) else {
+            logger.error("Invalid MP4 format")
             throw ImageReaderError.invalidData
         }
 
         // Find moov box
         guard let (moovOffset, moovSize) = try await findMoovBox(reader: reader) else {
+            logger.error("Moov box not found")
             throw ImageReaderError.invalidData
         }
 
@@ -81,7 +84,9 @@ public class Mp4Reader: ImageReader {
         }
     }
 
-    private func parseMoovBoxForBoth(data: Data) -> ([Mp4ImageInfo], (width: UInt32, height: UInt32)?) {
+    private func parseMoovBoxForBoth(data: Data) -> (
+        [Mp4ImageInfo], (width: UInt32, height: UInt32)?
+    ) {
         logger.debug("Parsing moov box, size: \(data.count)")
         var imageInfos: [Mp4ImageInfo] = []
         var trackDimensions: (width: UInt32, height: UInt32)?
@@ -121,8 +126,12 @@ public class Mp4Reader: ImageReader {
         // tkhd box structure: version(1) + flags(3) + ... + width(4) + height(4)
         guard tkhdData.count >= 84 else { return nil }
 
-        let width = tkhdData.subdata(in: 76 ..< 80).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let height = tkhdData.subdata(in: 80 ..< 84).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let width = tkhdData.subdata(in: 76..<80).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        let height = tkhdData.subdata(in: 80..<84).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
 
         // Convert from fixed-point format (16.16) to integers
         let widthInt = width >> 16
@@ -151,7 +160,7 @@ private func validateMp4Format(reader: Reader) async throws -> Bool {
 private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
     var offset: UInt64 = 0
 
-    while offset < 100_000_000 { // Reasonable limit for moov box search
+    while offset < 100_000_000 {  // Reasonable limit for moov box search
         // Ensure we have header data
         let boxSize = try await reader.readUInt32(at: offset)
         let boxType = try await reader.readString(at: offset + 4, length: 4)
@@ -161,7 +170,7 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
         }
 
         if boxSize <= 8 {
-            offset += 8 // Skip invalid box
+            offset += 8  // Skip invalid box
         } else {
             offset += UInt64(boxSize)
         }
@@ -178,11 +187,15 @@ private func findBoxData(in data: Data, boxType: String) -> Data? {
     // 不预先跳过，在找到meta box时再处理version/flags
 
     while offset + 8 <= data.count {
-        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let foundType = String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
+        let boxSize = data.subdata(in: Int(offset)..<Int(offset + 4)).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        let foundType =
+            String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii)
+            ?? ""
 
         boxCount += 1
-        if boxCount <= 20 { // 只显示前20个box
+        if boxCount <= 20 {  // 只显示前20个box
             logger.debug("Box #\(boxCount): type='\(foundType)', size=\(boxSize), offset=\(offset)")
         }
 
@@ -204,7 +217,7 @@ private func findBoxData(in data: Data, boxType: String) -> Data? {
             }
 
             logger.debug("Found box '\(boxType)' with data size \(dataSize)")
-            return data.subdata(in: Int(actualDataOffset) ..< Int(actualDataOffset + dataSize))
+            return data.subdata(in: Int(actualDataOffset)..<Int(actualDataOffset + dataSize))
         }
 
         if boxSize <= 8 {
@@ -229,19 +242,24 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
     var itemCount = 0
 
     while offset + 8 <= data.count {
-        let itemSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let itemSize = data.subdata(in: Int(offset)..<Int(offset + 4)).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
 
         guard itemSize > 8, offset + UInt64(itemSize) <= data.count else {
             offset += 8
             continue
         }
 
-        let itemName = String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
-        let itemData = data.subdata(in: Int(offset + 8) ..< Int(offset + UInt64(itemSize)))
+        let itemName =
+            String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii)
+            ?? ""
+        let itemData = data.subdata(in: Int(offset + 8)..<Int(offset + UInt64(itemSize)))
 
         itemCount += 1
-        if itemCount <= 10 { // 只显示前10个item
-            logger.debug("Item #\(itemCount): name='\(itemName)', size=\(itemSize), offset=\(offset)")
+        if itemCount <= 10 {  // 只显示前10个item
+            logger.debug(
+                "Item #\(itemCount): name='\(itemName)', size=\(itemSize), offset=\(offset)")
         }
 
         if itemName == "covr" {
@@ -263,7 +281,8 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
             logger.debug("Processing ThumbnailImage item")
             if let imageData = extractImageFromItem(data: itemData) {
                 imageInfos.append(imageData)
-                logger.debug("Added ThumbnailImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
+                logger.debug(
+                    "Added ThumbnailImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
             }
         }
 
@@ -278,12 +297,16 @@ private func extractImageFromItem(data: Data) -> Mp4ImageInfo? {
     var offset: UInt64 = 0
 
     while offset + 8 <= data.count {
-        let boxSize = data.subdata(in: Int(offset) ..< Int(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let boxType = String(data: data.subdata(in: Int(offset + 4) ..< Int(offset + 8)), encoding: .ascii) ?? ""
+        let boxSize = data.subdata(in: Int(offset)..<Int(offset + 4)).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        let boxType =
+            String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii)
+            ?? ""
 
         if boxType == "data", boxSize > 16 {
             // data box contains the actual image
-            let imageData = data.subdata(in: Int(offset + 16) ..< Int(offset + UInt64(boxSize)))
+            let imageData = data.subdata(in: Int(offset + 16)..<Int(offset + UInt64(boxSize)))
             if isJpegData(imageData) {
                 let (width, height) = extractJpegDimensions(data: imageData)
                 return Mp4ImageInfo(data: imageData, width: width, height: height)
@@ -309,7 +332,7 @@ private func isJpegData(_ data: Data) -> Bool {
 private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt32?) {
     guard data.count >= 10 else { return (nil, nil) }
 
-    var offset = 2 // Skip JPEG SOI marker (FF D8)
+    var offset = 2  // Skip JPEG SOI marker (FF D8)
 
     while offset + 4 < data.count {
         guard data[offset] == 0xFF else { break }
@@ -322,7 +345,7 @@ private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt3
             offset += 1
         }
 
-        if marker == 0xC0 || marker == 0xC2 { // SOF0 or SOF2
+        if marker == 0xC0 || marker == 0xC2 {  // SOF0 or SOF2
             guard offset + 6 < data.count else { break }
 
             let length = UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
