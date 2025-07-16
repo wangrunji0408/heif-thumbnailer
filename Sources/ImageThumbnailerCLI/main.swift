@@ -1,7 +1,7 @@
 import ArgumentParser
 import Foundation
 import ImageThumbnailer
-import os.log
+import OSLog
 
 private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "CLI")
 
@@ -37,7 +37,8 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
                 try fileHandle.seek(toOffset: offset)
                 let data = fileHandle.readData(ofLength: Int(length))
-                if data.isEmpty, length > 0 {
+                if data.count < Int(length) {
+                    logger.error("fail to read data at offset \(offset), length \(length)")
                     throw NSError(
                         domain: "ImageError", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "fail to read file data"]
@@ -81,7 +82,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             logger.info("found \(thumbnailList.count) thumbnails:")
             for (i, info) in thumbnailList.enumerated() {
                 logger.info(
-                    "  [\(i)] format: \(info.format), size: \(info.size) bytes, dimensions: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)"
+                    "  [\(i)] format: \(info.format, privacy: .public), size: \(info.size) bytes, dimensions: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)"
                 )
             }
 

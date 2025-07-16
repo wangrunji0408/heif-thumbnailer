@@ -15,16 +15,27 @@ class Reader {
 
     func read(at offset: UInt64, length: UInt32) async throws -> Data {
         for (bufferOffset, buffer) in buffers {
-            if offset >= bufferOffset, offset + UInt64(length) <= bufferOffset + UInt64(buffer.count) {
-                return buffer.subdata(in: Int(offset - bufferOffset) ..< Int(offset - bufferOffset + UInt64(length)))
+            if offset >= bufferOffset,
+                offset + UInt64(length) <= bufferOffset + UInt64(buffer.count)
+            {
+                return buffer.subdata(
+                    in: Int(offset - bufferOffset)..<Int(offset - bufferOffset + UInt64(length)))
             }
         }
-        return try await readAt(offset, length)
+        let data = try await readAt(offset, length)
+        if data.count < Int(length) {
+            throw NSError(
+                domain: "ReaderError", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Read length exceeds available data"])
+        }
+        return data
     }
 
     func prefetch(at offset: UInt64, length: UInt32) async throws {
         for (bufferOffset, buffer) in buffers {
-            if offset >= bufferOffset, offset + UInt64(length) <= bufferOffset + UInt64(buffer.count) {
+            if offset >= bufferOffset,
+                offset + UInt64(length) <= bufferOffset + UInt64(buffer.count)
+            {
                 return
             }
         }
@@ -52,6 +63,15 @@ class Reader {
             return data.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         } else {
             return data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        }
+    }
+
+    func readUInt64(at offset: UInt64, byteOrder: ByteOrder? = nil) async throws -> UInt64 {
+        let data = try await read(at: offset, length: 8)
+        if byteOrder ?? self.byteOrder == .bigEndian {
+            return data.withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
+        } else {
+            return data.withUnsafeBytes { $0.load(as: UInt64.self) }
         }
     }
 

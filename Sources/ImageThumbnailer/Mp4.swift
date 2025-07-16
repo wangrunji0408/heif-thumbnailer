@@ -1,5 +1,5 @@
 import Foundation
-import os.log
+import OSLog
 
 private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "Mp4Reader")
 
@@ -105,6 +105,10 @@ public class Mp4Reader: ImageReader {
                     logger.debug("Found ilst box in udta/meta, size: \(ilstData.count)")
                     imageInfos.append(contentsOf: parseIlstBox(data: ilstData))
                 }
+            } else {
+                // 直接在udta中查找缩略图数据
+                logger.debug("No meta box found in udta, searching for thumbnails directly")
+                imageInfos.append(contentsOf: parseUdtaForThumbnails(data: udtaData))
             }
         }
 
@@ -161,24 +165,30 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
     var offset: UInt64 = 0
 
     while true {
+        try await reader.prefetch(at: offset, length: 16)
         // Ensure we have header data
-        let boxSize = try await reader.readUInt32(at: offset)
+        let boxSize32 = try await reader.readUInt32(at: offset)
         let boxType = try await reader.readString(at: offset + 4, length: 4)
 
-        if boxType == "moov" {
-            return (offset, boxSize)
+        let actualBoxSize: UInt64
+        if boxSize32 == 1 {
+            // 64-bit box size follows
+            actualBoxSize = try await reader.readUInt64(at: offset + 8)
+        } else {
+            actualBoxSize = UInt64(boxSize32)
         }
 
-        if boxSize <= 8 {
-            offset += 8  // Skip invalid box
-        } else {
-            offset += UInt64(boxSize)
+        if boxType == "moov" {
+            return (offset, UInt32(actualBoxSize))
         }
+
+        offset += actualBoxSize
     }
 }
 
 private func findBoxData(in data: Data, boxType: String) -> Data? {
-    logger.debug("Searching for box type '\(boxType)' in data of size \(data.count)")
+    logger.debug(
+        "Searching for box type '\(boxType, privacy: .public)' in data of size \(data.count)")
     var offset: UInt64 = 0
     var boxCount = 0
 
@@ -194,7 +204,9 @@ private func findBoxData(in data: Data, boxType: String) -> Data? {
 
         boxCount += 1
         if boxCount <= 20 {  // 只显示前20个box
-            logger.debug("Box #\(boxCount): type='\(foundType)', size=\(boxSize), offset=\(offset)")
+            logger.debug(
+                "Box #\(boxCount): type='\(foundType, privacy: .public)', size=\(boxSize), offset=\(offset)"
+            )
         }
 
         if foundType == boxType {
@@ -214,7 +226,7 @@ private func findBoxData(in data: Data, boxType: String) -> Data? {
                 logger.debug("Skipping 4 bytes version/flags in meta box")
             }
 
-            logger.debug("Found box '\(boxType)' with data size \(dataSize)")
+            logger.debug("Found box '\(boxType, privacy: .public)' with data size \(dataSize)")
             return data.subdata(in: Int(actualDataOffset)..<Int(actualDataOffset + dataSize))
         }
 
@@ -362,4 +374,77 @@ private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt3
     }
 
     return (nil, nil)
+}
+
+private func parseUdtaForThumbnails(data: Data) -> [Mp4ImageInfo] {
+    logger.debug("Parsing udta box for thumbnails, size: \(data.count)")
+    var imageInfos: [Mp4ImageInfo] = []
+    var offset: UInt64 = 0
+    var boxCount = 0
+
+    while offset + 8 <= data.count {
+        let boxSize = data.subdata(in: Int(offset)..<Int(offset + 4)).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        let boxType =
+            String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii)
+            ?? ""
+
+        boxCount += 1
+        logger.debug(
+            "Box #\(boxCount): type='\(boxType, privacy: .public)', size=\(boxSize), offset=\(offset)"
+        )
+
+        // 检查是否是缩略图相关的box
+        if boxType == "thmb" {
+            let boxData = data.subdata(in: Int(offset + 8)..<Int(offset + UInt64(boxSize)))
+            if let thumbnailData = extractThumbnailFromBox(data: boxData) {
+                imageInfos.append(thumbnailData)
+                logger.debug(
+                    "Added thumbnail from \(boxType): \(thumbnailData.width ?? 0)x\(thumbnailData.height ?? 0)"
+                )
+            }
+        }
+
+        if boxSize <= 8 {
+            offset += 8
+        } else {
+            offset += UInt64(boxSize)
+        }
+
+        if offset >= UInt64(data.count) {
+            break
+        }
+    }
+
+    return imageInfos
+}
+
+private func extractThumbnailFromBox(data: Data) -> Mp4ImageInfo? {
+    logger.debug("Extracting thumbnail from box, size: \(data.count)")
+
+    // 查找JPEG开始标记
+    for i in 0..<data.count - 1 {
+        if data[i] == 0xFF && data[i + 1] == 0xD8 {
+            logger.debug("Found JPEG start marker at offset \(i)")
+            let jpegData = data.subdata(in: i..<data.count)
+
+            // 查找JPEG结束标记
+            for j in stride(from: jpegData.count - 1, to: 0, by: -1) {
+                if jpegData[j - 1] == 0xFF && jpegData[j] == 0xD9 {
+                    let finalJpegData = jpegData.subdata(in: 0..<j + 1)
+                    logger.debug("Found complete JPEG data, size: \(finalJpegData.count)")
+                    let (width, height) = extractJpegDimensions(data: finalJpegData)
+                    return Mp4ImageInfo(data: finalJpegData, width: width, height: height)
+                }
+            }
+
+            // 如果没有找到结束标记，使用剩余数据
+            logger.debug("No JPEG end marker found, using remaining data")
+            let (width, height) = extractJpegDimensions(data: jpegData)
+            return Mp4ImageInfo(data: jpegData, width: width, height: height)
+        }
+    }
+
+    return nil
 }

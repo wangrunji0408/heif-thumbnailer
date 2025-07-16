@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
-import os.log
+import OSLog
 
 private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "SonyArwReader")
 

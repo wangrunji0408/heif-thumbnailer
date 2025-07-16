@@ -1,8 +1,8 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import OSLog
 import UniformTypeIdentifiers
-import os.log
 
 #if canImport(UIKit)
     import UIKit
