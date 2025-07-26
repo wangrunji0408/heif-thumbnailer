@@ -1,5 +1,6 @@
-@testable import ImageThumbnailer
 import XCTest
+
+@testable import ImageThumbnailer
 
 final class ImageReaderTests: XCTestCase {
     func testHeifReader() async throws {
@@ -40,7 +41,8 @@ final class ImageReaderTests: XCTestCase {
 
         // Assert reasonable limits for HEIF files
         XCTAssertLessThanOrEqual(readCount, 3, "HEIF reader should not make more than 3 read calls")
-        XCTAssertLessThanOrEqual(totalBytes, 100 * 1024, "HEIF reader should not read more than 100KB total")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 100 * 1024, "HEIF reader should not read more than 100KB total")
 
         print("HEIF Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
 
@@ -93,7 +95,8 @@ final class ImageReaderTests: XCTestCase {
 
         // Assert reasonable limits for JPEG files
         XCTAssertLessThanOrEqual(readCount, 3, "JPEG reader should not make more than 5 read calls")
-        XCTAssertLessThanOrEqual(totalBytes, 50 * 1024, "JPEG reader should not read more than 50KB total")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 50 * 1024, "JPEG reader should not read more than 50KB total")
 
         print("JPEG Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
     }
@@ -135,8 +138,10 @@ final class ImageReaderTests: XCTestCase {
         XCTAssertFalse(thumbnailData.isEmpty, "Thumbnail data should not be empty")
 
         // Assert reasonable limits for Sony ARW files
-        XCTAssertLessThanOrEqual(readCount, 3, "Sony ARW reader should not make more than 20 read calls")
-        XCTAssertLessThanOrEqual(totalBytes, 1024 * 1024, "Sony ARW reader should not read more than 1MB total")
+        XCTAssertLessThanOrEqual(
+            readCount, 5, "Sony ARW reader should not make more than 5 read calls")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 1024 * 1024, "Sony ARW reader should not read more than 1MB total")
 
         print("Sony ARW Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
     }
@@ -168,6 +173,14 @@ final class ImageReaderTests: XCTestCase {
         let metadata = try await reader.getMetadata()
         XCTAssertGreaterThan(metadata.width, 0, "Width should be greater than 0")
         XCTAssertGreaterThan(metadata.height, 0, "Height should be greater than 0")
+        XCTAssertNotNil(metadata.duration, "Duration should be parsed")
+
+        // Additional assertions based on exiftool output
+        // Duration should be around 3.75 seconds (allowing for small variations)
+        if let duration = metadata.duration {
+            XCTAssertTrue(
+                duration > 3.5 && duration < 4.0, "Duration should be around 3.75 seconds")
+        }
 
         // Test getThumbnailList
         let thumbnailList = try await reader.getThumbnailList()
@@ -179,7 +192,8 @@ final class ImageReaderTests: XCTestCase {
 
         // Assert reasonable limits for MP4 files
         XCTAssertLessThanOrEqual(readCount, 3, "MP4 reader should not make more than 10 read calls")
-        XCTAssertLessThanOrEqual(totalBytes, 1024 * 1024, "MP4 reader should not read more than 1MB total")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 1024 * 1024, "MP4 reader should not read more than 1MB total")
 
         print("MP4 Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
     }

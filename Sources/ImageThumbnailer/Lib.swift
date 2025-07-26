@@ -18,6 +18,13 @@ public struct ThumbnailInfo {
 public struct Metadata {
     public let width: UInt32
     public let height: UInt32
+    public let duration: Double?  // Duration in seconds
+
+    public init(width: UInt32, height: UInt32, duration: Double? = nil) {
+        self.width = width
+        self.height = height
+        self.duration = duration
+    }
 }
 
 public enum ImageReaderError: Error {

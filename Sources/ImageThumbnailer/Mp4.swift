@@ -76,9 +76,16 @@ public class Mp4Reader: ImageReader {
         // Parse moov box to find thumbnails and track dimensions
         let (thumbnails, trackDimensions) = parseMoovBoxForBoth(data: moovData)
 
+        // Parse additional metadata like duration
+        let duration = parseDuration(data: moovData)
+
         imageInfos = thumbnails
         if let dimensions = trackDimensions {
-            metadata = Metadata(width: dimensions.width, height: dimensions.height)
+            metadata = Metadata(
+                width: dimensions.width,
+                height: dimensions.height,
+                duration: duration,
+            )
         } else {
             throw ImageReaderError.invalidData
         }
@@ -142,6 +149,32 @@ public class Mp4Reader: ImageReader {
         let heightInt = height >> 16
 
         return (widthInt, heightInt)
+    }
+
+    /// Parse video duration from mvhd box in moov
+    private func parseDuration(data: Data) -> Double? {
+        // Look for mvhd box
+        guard let mvhdData = findBoxData(in: data, boxType: "mvhd") else {
+            return nil
+        }
+
+        // mvhd box structure:
+        // version(1) + flags(3) + creation_time(4) + modification_time(4) +
+        // timescale(4) + duration(4) + ...
+        guard mvhdData.count >= 20 else { return nil }
+
+        // Get timescale (sample rate)
+        let timescale = mvhdData.subdata(in: 12..<16).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+
+        // Get duration in timescale units
+        let durationInTimescale = mvhdData.subdata(in: 16..<20).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+
+        // Convert to seconds
+        return Double(durationInTimescale) / Double(timescale)
     }
 }
 

@@ -288,6 +288,7 @@ public class JpegReader: ImageReader {
             }
         }
 
+        logger.debug("Parsed EXIF IFD: width=\(width), height=\(height)")
         return Metadata(width: width, height: height)
     }
 
@@ -439,7 +440,7 @@ public class JpegReader: ImageReader {
             let type = imageAttributes & 0x00FF_FFFF
 
             logger.debug(
-                "MP Entry \(i): flags=0x\(String(flags, radix: 16)), format=\(format), type=0x\(String(type, radix: 16)), size=\(imageSize), offset=\(imageOffset)"
+                "MP Entry \(i): flags=\(String(flags, radix: 16), privacy: .public), format=\(format), type=0x\(String(type, radix: 16), privacy: .public), size=\(imageSize), offset=\(imageOffset)"
             )
 
             // Process entry to create thumbnail

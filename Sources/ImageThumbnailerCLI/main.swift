@@ -34,7 +34,11 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             logger.info("extracting thumbnail from \(imagePath)...")
 
             // create read function
+            var readCount = 0
+            var readBytes = 0
             let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
+                readCount += 1
+                readBytes += Int(length)
                 try fileHandle.seek(toOffset: offset)
                 let data = fileHandle.readData(ofLength: Int(length))
                 if data.count < Int(length) {
@@ -71,6 +75,9 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
 
             let metadata = try await reader.getMetadata()
             logger.info("metadata: size: \(metadata.width)x\(metadata.height)")
+            if let duration = metadata.duration {
+                logger.info("duration: \(duration) seconds")
+            }
 
             let thumbnailList = try await reader.getThumbnailList()
             if thumbnailList.isEmpty {
@@ -104,6 +111,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(info.format)")
             try thumbnail.write(to: outputURL)
             logger.info("thumbnail saved to: \(outputURL.path)")
+            logger.info("read count: \(readCount), bytes: \(readBytes)")
         } catch {
             logger.error("\(error.localizedDescription)")
         }
