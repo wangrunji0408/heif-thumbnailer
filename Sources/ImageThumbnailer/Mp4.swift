@@ -488,6 +488,10 @@ public class Mp4Reader: ImageReader {
 
         // Image spatial extents property (ispe)
         var ispeData = Data()
+        ispeData.append(0) // version = 0
+        ispeData.append(0) // flags[0]
+        ispeData.append(0) // flags[1] 
+        ispeData.append(0) // flags[2]
         ispeData.append(contentsOf: withUnsafeBytes(of: width.bigEndian) { Data($0) })
         ispeData.append(contentsOf: withUnsafeBytes(of: height.bigEndian) { Data($0) })
         properties.append(
