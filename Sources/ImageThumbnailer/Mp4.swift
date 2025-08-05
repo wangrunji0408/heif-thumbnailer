@@ -22,7 +22,7 @@ public class Mp4Reader: ImageReader {
         return imageInfos?.map { info in
             ThumbnailInfo(
                 size: UInt32(info.data.count),
-                format: "jpeg",
+                format: detectImageFormat(data: info.data),
                 width: info.width,
                 height: info.height,
                 rotation: nil
@@ -79,7 +79,17 @@ public class Mp4Reader: ImageReader {
         // Parse additional metadata like duration
         let duration = parseDuration(data: moovData)
 
-        imageInfos = thumbnails
+        // If no thumbnails found, try to extract first frame for video files
+        var finalThumbnails = thumbnails
+        if thumbnails.isEmpty {
+            logger.info("No embedded thumbnails found, attempting first frame extraction")
+            if let firstFrameThumbnail = try await extractFirstFrame(moovData: moovData) {
+                finalThumbnails = [firstFrameThumbnail]
+                logger.info("Successfully extracted first frame as thumbnail")
+            }
+        }
+
+        imageInfos = finalThumbnails
         if let dimensions = trackDimensions {
             metadata = Metadata(
                 width: dimensions.width,
@@ -176,6 +186,428 @@ public class Mp4Reader: ImageReader {
         // Convert to seconds
         return Double(durationInTimescale) / Double(timescale)
     }
+
+    /// Extract first frame from video track as HEIC thumbnail
+    private func extractFirstFrame(moovData: Data) async throws -> Mp4ImageInfo? {
+        logger.debug("Starting first frame extraction")
+        
+        // Find video track information
+        guard let videoTrackInfo = findVideoTrackInfo(moovData: moovData) else {
+            logger.error("No video track found")
+            return nil
+        }
+        
+        // Find the media data offset for the first frame
+        guard let firstFrameOffset = try await findFirstFrameOffset(trackInfo: videoTrackInfo) else {
+            logger.error("Could not locate first frame")
+            return nil
+        }
+        
+        // Read the first frame data
+        guard let frameData = try await readFirstFrameData(at: firstFrameOffset, trackInfo: videoTrackInfo) else {
+            logger.error("Could not read first frame data")
+            return nil
+        }
+        
+        // Convert HEVC frame to HEIC format
+        guard let heicData = try await convertHevcFrameToHeic(frameData: frameData, trackInfo: videoTrackInfo) else {
+            logger.error("Could not convert HEVC frame to HEIC")
+            return nil
+        }
+        
+        return Mp4ImageInfo(
+            data: heicData,
+            width: videoTrackInfo.width,
+            height: videoTrackInfo.height
+        )
+    }
+    
+    /// Find video track information from moov data
+    private func findVideoTrackInfo(moovData: Data) -> VideoTrackInfo? {
+        // Look for trak box
+        guard let trakData = findBoxData(in: moovData, boxType: "trak") else {
+            return nil
+        }
+        
+        // Check if this is a video track by looking at track header and media info
+        guard let tkhdData = findBoxData(in: trakData, boxType: "tkhd"),
+              let mdiaData = findBoxData(in: trakData, boxType: "mdia"),
+              let hdlrData = findBoxData(in: mdiaData, boxType: "hdlr") else {
+            return nil
+        }
+        
+        // Check handler type to confirm this is a video track
+        guard hdlrData.count >= 16 else { return nil }
+        let handlerType = String(data: hdlrData.subdata(in: 8..<12), encoding: .ascii) ?? ""
+        guard handlerType == "vide" else { return nil }
+        
+        // Parse track dimensions from tkhd
+        guard tkhdData.count >= 84 else { return nil }
+        let width = tkhdData.subdata(in: 76..<80).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        } >> 16  // Convert from fixed-point
+        let height = tkhdData.subdata(in: 80..<84).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        } >> 16  // Convert from fixed-point
+        
+        // Find sample table for chunk and sample information
+        guard let minfData = findBoxData(in: mdiaData, boxType: "minf"),
+              let stblData = findBoxData(in: minfData, boxType: "stbl") else {
+            return nil
+        }
+        
+        // Extract HEVC configuration from sample description
+        let hevcConfig = extractHevcConfig(from: stblData)
+        
+        return VideoTrackInfo(
+            width: width,
+            height: height,
+            stblData: stblData,
+            hevcConfig: hevcConfig
+        )
+    }
+    
+    /// Find the offset of the first video frame
+    private func findFirstFrameOffset(trackInfo: VideoTrackInfo) async throws -> UInt64? {
+        // Look for stco (chunk offset) or co64 (64-bit chunk offset)
+        var chunkOffset: UInt64?
+        
+        if let stcoData = findBoxData(in: trackInfo.stblData, boxType: "stco"),
+           stcoData.count >= 8 {
+            // 32-bit chunk offsets
+            let entryCount = stcoData.subdata(in: 4..<8).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            }
+            if entryCount > 0 && stcoData.count >= 12 {
+                let firstChunkOffset32 = stcoData.subdata(in: 8..<12).withUnsafeBytes {
+                    $0.load(as: UInt32.self).bigEndian
+                }
+                chunkOffset = UInt64(firstChunkOffset32)
+            }
+        } else if let co64Data = findBoxData(in: trackInfo.stblData, boxType: "co64"),
+                  co64Data.count >= 8 {
+            // 64-bit chunk offsets
+            let entryCount = co64Data.subdata(in: 4..<8).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            }
+            if entryCount > 0 && co64Data.count >= 16 {
+                chunkOffset = co64Data.subdata(in: 8..<16).withUnsafeBytes {
+                    $0.load(as: UInt64.self).bigEndian
+                }
+            }
+        }
+        
+        return chunkOffset
+    }
+    
+    /// Read the first frame data
+    private func readFirstFrameData(at offset: UInt64, trackInfo: VideoTrackInfo) async throws -> Data? {
+        // Look for sample size information in stsz box
+        guard let stszData = findBoxData(in: trackInfo.stblData, boxType: "stsz"),
+              stszData.count >= 12 else {
+            logger.error("Sample size table not found")
+            return nil
+        }
+        
+        let sampleSize = stszData.subdata(in: 4..<8).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        
+        let frameSize: UInt32
+        if sampleSize != 0 {
+            // Fixed sample size
+            frameSize = sampleSize
+        } else {
+            // Variable sample sizes - read first entry
+            let sampleCount = stszData.subdata(in: 8..<12).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            }
+            guard sampleCount > 0 && stszData.count >= 16 else {
+                logger.error("No samples found")
+                return nil
+            }
+            frameSize = stszData.subdata(in: 12..<16).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            }
+        }
+        
+        logger.debug("Reading first frame: offset=\(offset), size=\(frameSize)")
+        return try await reader.read(at: offset, length: frameSize)
+    }
+    
+    /// Convert HEVC frame data to HEIC format
+    private func convertHevcFrameToHeic(frameData: Data, trackInfo: VideoTrackInfo) async throws -> Data? {
+        logger.debug("Converting HEVC frame to HEIC, frame size: \(frameData.count)")
+        
+        // Convert length-prefixed NAL units to Annex-B format
+        guard let annexBData = convertToAnnexB(frameData: frameData, hevcConfig: trackInfo.hevcConfig) else {
+            logger.error("Failed to convert HEVC frame to Annex-B format")
+            return nil
+        }
+        
+        logger.debug("Converted to Annex-B format, size: \(annexBData.count)")
+        
+        // Create a basic HEIC container for the HEVC frame
+        let thumbnail = HeifThumbnailEntry(
+            itemId: 1,
+            offset: 0,
+            size: UInt32(annexBData.count),
+            rotation: nil,
+            width: trackInfo.width,
+            height: trackInfo.height,
+            type: "hvc1",
+            properties: createBasicHevcProperties(width: trackInfo.width, height: trackInfo.height, hevcConfig: trackInfo.hevcConfig)
+        )
+        
+        logger.debug("Creating HEIC container for \(trackInfo.width)x\(trackInfo.height) image")
+        let heicData = try await createHEICFromHEVC(thumbnail, hevcData: annexBData)
+        
+        if let heicData = heicData {
+            logger.debug("Successfully created HEIC data, size: \(heicData.count)")
+        } else {
+            logger.error("Failed to create HEIC data")
+        }
+        
+        return heicData
+    }
+    
+    /// Convert length-prefixed NAL units to Annex-B format with parameter sets
+    private func convertToAnnexB(frameData: Data, hevcConfig: Data?) -> Data? {
+        var annexBData = Data()
+        
+        // First, add parameter sets from HEVC configuration
+        if let hevcConfig = hevcConfig {
+            logger.debug("Adding parameter sets from HEVC config, size: \(hevcConfig.count)")
+            if let parameterSets = extractParameterSets(from: hevcConfig) {
+                logger.debug("Found \(parameterSets.count) parameter sets")
+                for (index, paramSet) in parameterSets.enumerated() {
+                    logger.debug("Adding parameter set \(index + 1), size: \(paramSet.count)")
+                    // Add start code (0x00000001) before each parameter set
+                    annexBData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                    annexBData.append(paramSet)
+                }
+            } else {
+                logger.warning("No parameter sets found in HEVC config")
+            }
+        } else {
+            logger.warning("No HEVC config available")
+        }
+        
+        // Convert frame data from length-prefixed to Annex-B format
+        var offset = 0
+        var nalUnitCount = 0
+        
+        while offset + 4 < frameData.count {
+            // Read NAL unit length (4 bytes, big endian)
+            let nalLength = frameData.subdata(in: offset..<offset + 4).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            }
+            
+            guard nalLength > 0 && offset + 4 + Int(nalLength) <= frameData.count else {
+                logger.debug("Invalid NAL unit at offset \(offset): length=\(nalLength)")
+                break
+            }
+            
+            nalUnitCount += 1
+            if nalUnitCount <= 5 {  // Log first few NAL units
+                logger.debug("NAL unit \(nalUnitCount): offset=\(offset), length=\(nalLength)")
+            }
+            
+            // Add start code (0x00000001)
+            annexBData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            
+            // Add NAL unit data
+            let nalData = frameData.subdata(in: offset + 4..<offset + 4 + Int(nalLength))
+            annexBData.append(nalData)
+            
+            offset += 4 + Int(nalLength)
+        }
+        
+        logger.debug("Converted \(nalUnitCount) NAL units, total Annex-B size: \(annexBData.count)")
+        return annexBData.isEmpty ? nil : annexBData
+    }
+    
+    /// Extract parameter sets (VPS, SPS, PPS) from HEVC configuration
+    private func extractParameterSets(from hevcConfig: Data) -> [Data]? {
+        guard hevcConfig.count >= 23 else { return nil }
+        
+        var parameterSets: [Data] = []
+        var offset = 22 // Skip to numOfArrays field
+        
+        guard offset < hevcConfig.count else { return nil }
+        let numArrays = hevcConfig[offset]
+        offset += 1
+        
+        for _ in 0..<numArrays {
+            guard offset + 3 <= hevcConfig.count else { break }
+            
+            // Skip array_completeness and NAL_unit_type (1 byte)
+            offset += 1
+            
+            // Read number of NAL units in this array
+            let numNalus = hevcConfig.subdata(in: offset..<offset + 2).withUnsafeBytes {
+                $0.load(as: UInt16.self).bigEndian
+            }
+            offset += 2
+            
+            // Extract each NAL unit
+            for _ in 0..<numNalus {
+                guard offset + 2 <= hevcConfig.count else { break }
+                
+                let naluLength = hevcConfig.subdata(in: offset..<offset + 2).withUnsafeBytes {
+                    $0.load(as: UInt16.self).bigEndian
+                }
+                offset += 2
+                
+                guard offset + Int(naluLength) <= hevcConfig.count else { break }
+                
+                let naluData = hevcConfig.subdata(in: offset..<offset + Int(naluLength))
+                parameterSets.append(naluData)
+                offset += Int(naluLength)
+            }
+        }
+        
+        return parameterSets.isEmpty ? nil : parameterSets
+    }
+    
+    /// Extract HEVC configuration from sample description table
+    private func extractHevcConfig(from stblData: Data) -> Data? {
+        // Look for sample description (stsd) box
+        guard let stsdData = findBoxData(in: stblData, boxType: "stsd"),
+              stsdData.count >= 16 else {
+            logger.error("Could not find stsd box or box too small")
+            return nil
+        }
+        
+        logger.debug("stsd box data size: \(stsdData.count)")
+        
+        // Parse stsd box: version(1) + flags(3) + entry_count(4) + entries...
+        guard stsdData.count >= 8 else {
+            logger.error("stsd box too small for header")
+            return nil
+        }
+        
+        let entryCount = stsdData.subdata(in: 4..<8).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        logger.debug("Sample description entry count: \(entryCount)")
+        
+        guard entryCount > 0 else {
+            logger.error("No sample entries found")
+            return nil
+        }
+        
+        // Start parsing from offset 8 (after stsd header)
+        let entryOffset = 8
+        guard stsdData.count > entryOffset + 8 else { 
+            logger.error("stsd data too small for sample entry")
+            return nil 
+        }
+        
+        // Read first sample entry size
+        let entrySize = stsdData.subdata(in: entryOffset..<entryOffset + 4).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
+        
+        // Read codec type (format)
+        let codecType = String(data: stsdData.subdata(in: entryOffset + 4..<entryOffset + 8), encoding: .ascii) ?? ""
+        logger.debug("Found codec type: '\(codecType)', entry size: \(entrySize)")
+        
+        // Log some bytes for debugging
+        if stsdData.count > entryOffset + 16 {
+            let debugBytes = stsdData.subdata(in: entryOffset..<min(entryOffset + 16, stsdData.count))
+            let hexString = debugBytes.map { String(format: "%02x", $0) }.joined(separator: " ")
+            logger.debug("Sample entry header bytes: \(hexString)")
+        }
+        
+        guard codecType == "hvc1" || codecType == "hev1" else {
+            logger.error("Not an HEVC codec: '\(codecType)'")
+            return nil
+        }
+        
+        // The sample entry data starts from entryOffset and has size entrySize
+        let sampleEntryData = stsdData.subdata(in: entryOffset..<min(entryOffset + Int(entrySize), stsdData.count))
+        
+        // For HEVC sample entry, the structure is:
+        // size(4) + type(4) + reserved(6) + data_reference_index(2) + pre_defined(2) + reserved(2) + 
+        // pre_defined(12) + width(2) + height(2) + ... + compressorname(32) + depth(2) + pre_defined(2) + 
+        // then extension boxes including hvcC
+        
+        // The hvcC box should be after the standard video sample entry fields
+        // Standard video sample entry is 78 bytes, then comes extension boxes
+        let videoSampleEntrySize = 78
+        guard sampleEntryData.count > videoSampleEntrySize else {
+            logger.error("Sample entry too small for video sample entry + extensions")
+            return nil
+        }
+        
+        // Look for hvcC in the extension area
+        let extensionData = sampleEntryData.subdata(in: videoSampleEntrySize..<sampleEntryData.count)
+        logger.debug("Searching for hvcC in extension data, size: \(extensionData.count)")
+        
+        let hvcCData = findBoxData(in: extensionData, boxType: "hvcC")
+        
+        if let hvcCData = hvcCData {
+            logger.debug("Found hvcC configuration, size: \(hvcCData.count)")
+        } else {
+            logger.error("hvcC configuration not found in sample entry")
+        }
+        
+        return hvcCData
+    }
+    
+    /// Create HEVC properties for HEIC container
+    private func createBasicHevcProperties(width: UInt32, height: UInt32, hevcConfig: Data?) -> [ItemProperty] {
+        var properties: [ItemProperty] = []
+        
+        // Image spatial extents property (ispe)
+        var ispeData = Data()
+        ispeData.append(contentsOf: withUnsafeBytes(of: width.bigEndian) { Data($0) })
+        ispeData.append(contentsOf: withUnsafeBytes(of: height.bigEndian) { Data($0) })
+        properties.append(ItemProperty(
+            propertyIndex: 1,
+            propertyType: "ispe",
+            rotation: nil,
+            width: width,
+            height: height,
+            rawData: ispeData
+        ))
+        
+        // HEVC configuration property (hvcC)
+        let hvcCData: Data
+        if let hevcConfig = hevcConfig {
+            // Use extracted HEVC configuration
+            hvcCData = hevcConfig
+        } else {
+            // Fallback to minimal HEVC configuration
+            hvcCData = Data([
+                0x01,  // configuration version
+                0x01,  // general_profile_space, general_tier_flag, general_profile_idc
+                0x40, 0x00, 0x00, 0x00,  // general_profile_compatibility_flags
+                0x90, 0x00, 0x00, 0x00, 0x00, 0x00,  // general_constraint_indicator_flags
+                0x5d,  // general_level_idc
+                0xf0, 0x00,  // min_spatial_segmentation_idc
+                0xfc,  // parallelismType
+                0xfd,  // chromaFormat
+                0xf8,  // bitDepthLumaMinus8
+                0xf8,  // bitDepthChromaMinus8
+                0x00, 0x00,  // avgFrameRate
+                0x0f,  // constantFrameRate, numTemporalLayers, temporalIdNested, lengthSizeMinusOne
+                0x00   // numOfArrays (no parameter sets)
+            ])
+        }
+        
+        properties.append(ItemProperty(
+            propertyIndex: 2,
+            propertyType: "hvcC",
+            rotation: nil,
+            width: nil,
+            height: nil,
+            rawData: hvcCData
+        ))
+        
+        return properties
+    }
 }
 
 // MARK: - MP4 Data Structures
@@ -184,6 +616,13 @@ private struct Mp4ImageInfo {
     let data: Data
     let width: UInt32?
     let height: UInt32?
+}
+
+private struct VideoTrackInfo {
+    let width: UInt32
+    let height: UInt32
+    let stblData: Data
+    let hevcConfig: Data?
 }
 
 // MARK: - Private Implementation
@@ -480,4 +919,27 @@ private func extractThumbnailFromBox(data: Data) -> Mp4ImageInfo? {
     }
 
     return nil
+}
+
+/// Detect image format based on data header
+private func detectImageFormat(data: Data) -> String {
+    guard data.count >= 8 else { return "unknown" }
+    
+    // Check for JPEG
+    if data[0] == 0xFF && data[1] == 0xD8 {
+        return "jpeg"
+    }
+    
+    // Check for HEIC/HEIF
+    if data.count >= 12 {
+        let ftyp = String(data: data.subdata(in: 4..<8), encoding: .ascii) ?? ""
+        if ftyp == "ftyp" {
+            let brand = String(data: data.subdata(in: 8..<12), encoding: .ascii) ?? ""
+            if brand == "heic" || brand == "heix" || brand == "heif" {
+                return "heic"
+            }
+        }
+    }
+    
+    return "unknown"
 }

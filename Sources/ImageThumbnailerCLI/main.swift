@@ -64,7 +64,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 reader = JpegReader(readAt: readAt)
             case "arw":
                 reader = SonyArwReader(readAt: readAt)
-            case "mp4":
+            case "mp4", "mov":
                 reader = Mp4Reader(readAt: readAt)
             default:
                 logger.error(
