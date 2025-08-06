@@ -25,7 +25,7 @@ public class Mp4Reader: ImageReader {
                 format: detectImageFormat(data: info.data),
                 width: info.width,
                 height: info.height,
-                rotation: nil
+                rotation: info.rotation.map { Int($0) }
             )
         } ?? []
     }
@@ -76,14 +76,17 @@ public class Mp4Reader: ImageReader {
         // Parse moov box to find thumbnails and track dimensions
         let (thumbnails, trackDimensions) = parseMoovBoxForBoth(data: moovData)
 
-        // Parse additional metadata like duration
+        // Parse additional metadata like duration and rotation
         let duration = parseDuration(data: moovData)
+        let rotation = parseTrackRotation(data: moovData)
 
         // If no thumbnails found, try to extract first frame for video files
         var finalThumbnails = thumbnails
         if thumbnails.isEmpty {
             logger.info("No embedded thumbnails found, attempting first frame extraction")
-            if let firstFrameThumbnail = try await extractFirstFrame(moovData: moovData) {
+            if let firstFrameThumbnail = try await extractFirstFrame(
+                moovData: moovData, rotation: rotation)
+            {
                 finalThumbnails = [firstFrameThumbnail]
                 logger.info("Successfully extracted first frame as thumbnail")
             }
@@ -111,6 +114,12 @@ public class Mp4Reader: ImageReader {
         // Try to get track dimensions first
         trackDimensions = parseTrackDimensions(data: data)
 
+        // Parse rotation from track header matrix
+        let rotation = parseTrackRotation(data: data)
+        if let rotation = rotation {
+            logger.debug("Parsed track rotation: \(rotation)°")
+        }
+
         // Try: moov/udta/meta/ilst
         if let udtaData = findBoxData(in: data, boxType: "udta") {
             logger.debug("Found udta box, size: \(udtaData.count)")
@@ -120,12 +129,13 @@ public class Mp4Reader: ImageReader {
                 // 在meta box中查找ilst box
                 if let ilstData = findBoxData(in: metaData, boxType: "ilst") {
                     logger.debug("Found ilst box in udta/meta, size: \(ilstData.count)")
-                    imageInfos.append(contentsOf: parseIlstBox(data: ilstData))
+                    imageInfos.append(contentsOf: parseIlstBox(data: ilstData, rotation: rotation))
                 }
             } else {
                 // 直接在udta中查找缩略图数据
                 logger.debug("No meta box found in udta, searching for thumbnails directly")
-                imageInfos.append(contentsOf: parseUdtaForThumbnails(data: udtaData))
+                imageInfos.append(
+                    contentsOf: parseUdtaForThumbnails(data: udtaData, rotation: rotation))
             }
         }
 
@@ -161,6 +171,166 @@ public class Mp4Reader: ImageReader {
         return (widthInt, heightInt)
     }
 
+    /// Extract rotation angle from track header matrix - search all tracks for video tracks with rotation
+    private func parseTrackRotation(data: Data) -> Double? {
+        var offset: UInt64 = 0
+        var trackIndex = 0
+
+        // Search through all tracks to find video tracks
+        while offset + 8 <= data.count {
+            let boxSize = data.subdata(in: Int(offset)..<Int(offset + 4)).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            }
+            let boxType =
+                String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii)
+                ?? ""
+
+            guard boxSize > 8 && offset + UInt64(boxSize) <= data.count else {
+                offset += 8
+                continue
+            }
+
+            if boxType == "trak" {
+                trackIndex += 1
+                let trakData = data.subdata(in: Int(offset + 8)..<Int(offset + UInt64(boxSize)))
+
+                // Check if this is a video track and get its rotation
+                if let rotation = parseTrackRotationFromTrakData(
+                    trakData: trakData, trackIndex: trackIndex)
+                {
+                    logger.debug("Found rotation \(rotation)° in track \(trackIndex)")
+                    return rotation
+                }
+            }
+
+            offset += UInt64(boxSize)
+        }
+
+        logger.debug("No rotation found in any video tracks")
+        return nil
+    }
+
+    /// Parse rotation from a specific trak box data
+    private func parseTrackRotationFromTrakData(trakData: Data, trackIndex: Int) -> Double? {
+        // Check if this is a video track by examining the handler type
+        guard let mdiaData = findBoxData(in: trakData, boxType: "mdia"),
+            let hdlrData = findBoxData(in: mdiaData, boxType: "hdlr"),
+            hdlrData.count >= 16
+        else {
+            return nil
+        }
+
+        let handlerType = String(data: hdlrData.subdata(in: 8..<12), encoding: .ascii) ?? ""
+        guard handlerType == "vide" else {
+            logger.debug("Track \(trackIndex) is not a video track (handler: \(handlerType))")
+            return nil
+        }
+
+        logger.debug("Track \(trackIndex) is a video track, checking for rotation")
+
+        // Look for tkhd (track header) box within trak
+        guard let tkhdData = findBoxData(in: trakData, boxType: "tkhd") else {
+            return nil
+        }
+
+        // Parse tkhd box to get matrix structure
+        guard tkhdData.count >= 76 else {
+            logger.debug("Track \(trackIndex) tkhd box too small for matrix: \(tkhdData.count)")
+            return nil
+        }
+
+        // Check version to determine matrix offset
+        let version = tkhdData[0]
+        let matrixOffset: Int
+        if version == 0 {
+            // Version 0: 32-bit timestamps
+            // version(1) + flags(3) + creation_time(4) + modification_time(4) + track_id(4) + reserved(4) +
+            // duration(4) + reserved(8) + layer(2) + alternate_group(2) + volume(2) + reserved(2) = 40 bytes
+            matrixOffset = 40
+        } else {
+            // Version 1: 64-bit timestamps
+            // version(1) + flags(3) + creation_time(8) + modification_time(8) + track_id(4) + reserved(4) +
+            // duration(8) + reserved(8) + layer(2) + alternate_group(2) + volume(2) + reserved(2) = 52 bytes
+            matrixOffset = 52
+        }
+
+        guard tkhdData.count >= matrixOffset + 36 else {
+            logger.debug(
+                "Track \(trackIndex) tkhd box too small for matrix at offset \(matrixOffset): \(tkhdData.count)"
+            )
+            return nil
+        }
+
+        // Extract matrix elements [a, b, u, c, d, v, x, y, w] (9x 32-bit fixed-point values)
+        var matrix: [Double] = []
+        for i in 0..<9 {
+            let offset = matrixOffset + i * 4
+            let raw = tkhdData.subdata(in: offset..<offset + 4).withUnsafeBytes {
+                Int32(bigEndian: $0.load(as: Int32.self))
+            }
+
+            // Convert from fixed point to double
+            // According to QuickTime spec and ExifTool behavior:
+            // Elements 0,1,3,4 (a,b,c,d): transformation coefficients in 16.16 format
+            // Elements 2,5 (u,v): perspective coefficients in 2.30 format
+            // Elements 6,7 (x,y): translation values in 16.16 format
+            // Element 8 (w): perspective coefficient in 2.30 format
+            let value: Double
+            if i == 2 || i == 5 || i == 8 {
+                // Elements u, v, w are in 2.30 format
+                value = Double(raw) / Double(1 << 30)
+            } else {
+                // Elements a, b, c, d, x, y are in 16.16 format
+                value = Double(raw) / 65536.0
+            }
+            matrix.append(value)
+        }
+
+        let rawMatrix = (0..<9).map { i in
+            let offset = matrixOffset + i * 4
+            return tkhdData.subdata(in: offset..<offset + 4).withUnsafeBytes {
+                Int32(bigEndian: $0.load(as: Int32.self))
+            }
+        }
+        logger.debug(
+            "Track \(trackIndex) Raw Matrix: [\(rawMatrix.map { String(format: "%d", $0) }.joined(separator: ", "))]"
+        )
+        logger.debug(
+            "Track \(trackIndex) Matrix: [\(matrix.map { String(format: "%.6f", $0) }.joined(separator: ", "))]"
+        )
+
+        // Calculate rotation angle from transformation matrix
+        let a = matrix[0]  // x-scaling/rotation
+        let b = matrix[1]  // y-skewing/rotation
+
+        // Don't skip matrices that appear to be identity - let the calculation proceed
+        // because some rotations might have subtle differences
+
+        guard a != 0 || b != 0 else {
+            logger.debug("Track \(trackIndex) matrix elements a and b are both zero")
+            return nil
+        }
+
+        let angleRadians = atan2(b, a)
+        var angleDegrees = angleRadians * 180.0 / Double.pi
+
+        // Normalize to 0-360 range
+        if angleDegrees < 0 {
+            angleDegrees += 360
+        }
+
+        // Round to nearest common rotation angle (0, 90, 180, 270)
+        let commonRotations = [0.0, 90.0, 180.0, 270.0]
+        let roundedAngle =
+            commonRotations.min(by: { abs($0 - angleDegrees) < abs($1 - angleDegrees) })
+            ?? round(angleDegrees)
+
+        logger.debug(
+            "Track \(trackIndex) calculated rotation: \(angleDegrees)° (rounded: \(roundedAngle)°)")
+
+        return roundedAngle
+    }
+
     /// Parse video duration from mvhd box in moov
     private func parseDuration(data: Data) -> Double? {
         // Look for mvhd box
@@ -188,7 +358,8 @@ public class Mp4Reader: ImageReader {
     }
 
     /// Extract first frame from video track as HEIC thumbnail
-    private func extractFirstFrame(moovData: Data) async throws -> Mp4ImageInfo? {
+    private func extractFirstFrame(moovData: Data, rotation: Double?) async throws -> Mp4ImageInfo?
+    {
         logger.debug("Starting first frame extraction")
 
         // Find video track information
@@ -225,7 +396,8 @@ public class Mp4Reader: ImageReader {
         return Mp4ImageInfo(
             data: heicData,
             width: videoTrackInfo.width,
-            height: videoTrackInfo.height
+            height: videoTrackInfo.height,
+            rotation: rotation
         )
     }
 
@@ -270,11 +442,15 @@ public class Mp4Reader: ImageReader {
         // Extract HEVC configuration from sample description
         let hevcConfig = extractHevcConfig(from: stblData)
 
+        // Parse rotation from track data
+        let rotation = parseTrackRotationFromTrakData(trakData: trakData, trackIndex: 0)
+
         return VideoTrackInfo(
             width: width,
             height: height,
             stblData: stblData,
-            hevcConfig: hevcConfig
+            hevcConfig: hevcConfig,
+            rotation: rotation
         )
     }
 
@@ -368,12 +544,13 @@ public class Mp4Reader: ImageReader {
             itemId: 1,
             offset: 0,
             size: UInt32(hevcData.count),
-            rotation: nil,
+            rotation: trackInfo.rotation.map { Int($0) },
             width: trackInfo.width,
             height: trackInfo.height,
             type: "hvc1",
             properties: createBasicHevcProperties(
-                width: trackInfo.width, height: trackInfo.height, hevcConfig: trackInfo.hevcConfig)
+                width: trackInfo.width, height: trackInfo.height, hevcConfig: trackInfo.hevcConfig,
+                rotation: trackInfo.rotation)
         )
 
         logger.debug("Creating HEIC container for \(trackInfo.width)x\(trackInfo.height) image")
@@ -481,28 +658,32 @@ public class Mp4Reader: ImageReader {
     }
 
     /// Create HEVC properties for HEIC container
-    private func createBasicHevcProperties(width: UInt32, height: UInt32, hevcConfig: Data?)
+    private func createBasicHevcProperties(
+        width: UInt32, height: UInt32, hevcConfig: Data?, rotation: Double?
+    )
         -> [ItemProperty]
     {
         var properties: [ItemProperty] = []
+        var propertyIndex: UInt32 = 1
 
         // Image spatial extents property (ispe)
         var ispeData = Data()
-        ispeData.append(0) // version = 0
-        ispeData.append(0) // flags[0]
-        ispeData.append(0) // flags[1] 
-        ispeData.append(0) // flags[2]
+        ispeData.append(0)  // version = 0
+        ispeData.append(0)  // flags[0]
+        ispeData.append(0)  // flags[1]
+        ispeData.append(0)  // flags[2]
         ispeData.append(contentsOf: withUnsafeBytes(of: width.bigEndian) { Data($0) })
         ispeData.append(contentsOf: withUnsafeBytes(of: height.bigEndian) { Data($0) })
         properties.append(
             ItemProperty(
-                propertyIndex: 1,
+                propertyIndex: propertyIndex,
                 propertyType: "ispe",
                 rotation: nil,
                 width: width,
                 height: height,
                 rawData: ispeData
             ))
+        propertyIndex += 1
 
         // HEVC configuration property (hvcC)
         let hvcCData: Data
@@ -532,13 +713,51 @@ public class Mp4Reader: ImageReader {
 
         properties.append(
             ItemProperty(
-                propertyIndex: 2,
+                propertyIndex: propertyIndex,
                 propertyType: "hvcC",
                 rotation: nil,
                 width: nil,
                 height: nil,
                 rawData: hvcCData
             ))
+        propertyIndex += 1
+
+        // Add rotation property (irot) if rotation is specified
+        if let rotation = rotation, rotation != 0.0 {
+            logger.debug("Adding rotation property: \(rotation)°")
+
+            // Convert rotation angle to HEIF irot format
+            // HEIF irot property format: 1 byte with rotation in 90-degree increments
+            // 0 = 0°, 1 = 90° CCW, 2 = 180°, 3 = 270° CCW (90° CW)
+            // QuickTime rotation is clockwise, HEIF irot is counter-clockwise
+            // So we need to convert: CW 90° -> CCW 270° (irot=3), CW 270° -> CCW 90° (irot=1)
+            let normalizedRotation = Int(rotation) % 360
+            let irotValue: UInt8
+            switch normalizedRotation {
+            case 90:
+                irotValue = 3  // CW 90° -> CCW 270°
+            case 180:
+                irotValue = 2  // 180° is same in both directions
+            case 270:
+                irotValue = 1  // CW 270° -> CCW 90°
+            default:
+                irotValue = 0  // 0° or unsupported angle
+            }
+
+            var irotData = Data()
+            irotData.append(irotValue)
+
+            properties.append(
+                ItemProperty(
+                    propertyIndex: propertyIndex,
+                    propertyType: "irot",
+                    rotation: Int(rotation),
+                    width: nil,
+                    height: nil,
+                    rawData: irotData
+                ))
+            propertyIndex += 1
+        }
 
         return properties
     }
@@ -550,6 +769,7 @@ private struct Mp4ImageInfo {
     let data: Data
     let width: UInt32?
     let height: UInt32?
+    let rotation: Double?
 }
 
 private struct VideoTrackInfo {
@@ -557,6 +777,7 @@ private struct VideoTrackInfo {
     let height: UInt32
     let stblData: Data
     let hevcConfig: Data?
+    let rotation: Double?
 }
 
 // MARK: - Private Implementation
@@ -651,7 +872,7 @@ private func findBoxData(in data: Data, boxType: String) -> Data? {
     return nil
 }
 
-private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
+private func parseIlstBox(data: Data, rotation: Double?) -> [Mp4ImageInfo] {
     logger.debug("Parsing ilst box, size: \(data.count)")
     var imageInfos: [Mp4ImageInfo] = []
     var offset: UInt64 = 0
@@ -681,21 +902,21 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
         if itemName == "covr" {
             // Cover Art
             logger.debug("Processing Cover Art item")
-            if let imageData = extractImageFromItem(data: itemData) {
+            if let imageData = extractImageFromItem(data: itemData, rotation: rotation) {
                 imageInfos.append(imageData)
                 logger.debug("Added Cover Art: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
             }
         } else if itemName == "snal" {
             // PreviewImage
             logger.debug("Processing PreviewImage item")
-            if let imageData = extractImageFromItem(data: itemData) {
+            if let imageData = extractImageFromItem(data: itemData, rotation: rotation) {
                 imageInfos.append(imageData)
                 logger.debug("Added PreviewImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
             }
         } else if itemName == "tnal" {
             // ThumbnailImage
             logger.debug("Processing ThumbnailImage item")
-            if let imageData = extractImageFromItem(data: itemData) {
+            if let imageData = extractImageFromItem(data: itemData, rotation: rotation) {
                 imageInfos.append(imageData)
                 logger.debug(
                     "Added ThumbnailImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
@@ -708,7 +929,7 @@ private func parseIlstBox(data: Data) -> [Mp4ImageInfo] {
     return imageInfos
 }
 
-private func extractImageFromItem(data: Data) -> Mp4ImageInfo? {
+private func extractImageFromItem(data: Data, rotation: Double?) -> Mp4ImageInfo? {
     logger.debug("extractImageFromItem: size=\(data.count)")
     var offset: UInt64 = 0
 
@@ -725,7 +946,8 @@ private func extractImageFromItem(data: Data) -> Mp4ImageInfo? {
             let imageData = data.subdata(in: Int(offset + 16)..<Int(offset + UInt64(boxSize)))
             if isJpegData(imageData) {
                 let (width, height) = extractJpegDimensions(data: imageData)
-                return Mp4ImageInfo(data: imageData, width: width, height: height)
+                return Mp4ImageInfo(
+                    data: imageData, width: width, height: height, rotation: rotation)
             }
         }
 
@@ -782,7 +1004,7 @@ private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt3
     return (nil, nil)
 }
 
-private func parseUdtaForThumbnails(data: Data) -> [Mp4ImageInfo] {
+private func parseUdtaForThumbnails(data: Data, rotation: Double?) -> [Mp4ImageInfo] {
     logger.debug("Parsing udta box for thumbnails, size: \(data.count)")
     var imageInfos: [Mp4ImageInfo] = []
     var offset: UInt64 = 0
@@ -804,7 +1026,7 @@ private func parseUdtaForThumbnails(data: Data) -> [Mp4ImageInfo] {
         // 检查是否是缩略图相关的box
         if boxType == "thmb" {
             let boxData = data.subdata(in: Int(offset + 8)..<Int(offset + UInt64(boxSize)))
-            if let thumbnailData = extractThumbnailFromBox(data: boxData) {
+            if let thumbnailData = extractThumbnailFromBox(data: boxData, rotation: rotation) {
                 imageInfos.append(thumbnailData)
                 logger.debug(
                     "Added thumbnail from \(boxType): \(thumbnailData.width ?? 0)x\(thumbnailData.height ?? 0)"
@@ -826,7 +1048,7 @@ private func parseUdtaForThumbnails(data: Data) -> [Mp4ImageInfo] {
     return imageInfos
 }
 
-private func extractThumbnailFromBox(data: Data) -> Mp4ImageInfo? {
+private func extractThumbnailFromBox(data: Data, rotation: Double?) -> Mp4ImageInfo? {
     logger.debug("Extracting thumbnail from box, size: \(data.count)")
 
     // 查找JPEG开始标记
@@ -841,14 +1063,15 @@ private func extractThumbnailFromBox(data: Data) -> Mp4ImageInfo? {
                     let finalJpegData = jpegData.subdata(in: 0..<j + 1)
                     logger.debug("Found complete JPEG data, size: \(finalJpegData.count)")
                     let (width, height) = extractJpegDimensions(data: finalJpegData)
-                    return Mp4ImageInfo(data: finalJpegData, width: width, height: height)
+                    return Mp4ImageInfo(
+                        data: finalJpegData, width: width, height: height, rotation: rotation)
                 }
             }
 
             // 如果没有找到结束标记，使用剩余数据
             logger.debug("No JPEG end marker found, using remaining data")
             let (width, height) = extractJpegDimensions(data: jpegData)
-            return Mp4ImageInfo(data: jpegData, width: width, height: height)
+            return Mp4ImageInfo(data: jpegData, width: width, height: height, rotation: rotation)
         }
     }
 
