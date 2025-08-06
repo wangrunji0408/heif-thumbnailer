@@ -11,6 +11,7 @@ public class SonyArwReader: ImageReader {
     private let reader: Reader
     private var thumbnailEntries: [ThumbnailEntry]?
     private var metadata: Metadata?
+    private var orientation: UInt16?
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
         reader = Reader(readAt: readAt)
@@ -27,7 +28,7 @@ public class SonyArwReader: ImageReader {
                 format: "jpeg",
                 width: entry.width,
                 height: entry.height,
-                rotation: nil
+                rotation: orientationToRotation(orientation)
             )
         } ?? []
     }
@@ -144,6 +145,11 @@ public class SonyArwReader: ImageReader {
             case 0x0202:  // JPEGInterchangeFormatLength (thumbnail length)
                 thumbnailLength = value
 
+            case 0x0112:  // Orientation
+                if ifdIndex == 0 {  // Only use orientation from main IFD
+                    orientation = UInt16(value)
+                }
+
             case 0x014A:  // SubIFD
                 let subIfdOffset = value
                 let subIfdDimensions = try await parseSubIFDForDimensions(
@@ -238,6 +244,18 @@ public class SonyArwReader: ImageReader {
         let ifdOffset = try await reader.readUInt32(at: 4)
 
         return ifdOffset
+    }
+
+    private func orientationToRotation(_ orientation: UInt16?) -> Int? {
+        guard let orientation = orientation else { return nil }
+        
+        switch orientation {
+        case 1: return 0    // Top-left (normal)
+        case 3: return 180  // Bottom-right (rotate 180)
+        case 6: return 90   // Right-top (rotate 90 CW)
+        case 8: return 270  // Left-bottom (rotate 270 CW or 90 CCW)
+        default: return 0   // Default to no rotation for unknown orientations
+        }
     }
 }
 
