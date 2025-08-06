@@ -20,9 +20,24 @@ public class Mp4Reader: ImageReader {
         }
 
         return imageInfos?.map { info in
-            ThumbnailInfo(
-                size: UInt32(info.data.count),
-                format: detectImageFormat(data: info.data),
+            // For thumbnail list, we estimate size based on available information
+            let estimatedSize: UInt32
+            let format: String
+
+            if let embeddedData = info.embeddedData {
+                estimatedSize = UInt32(embeddedData.count)
+                format = detectImageFormat(data: embeddedData)
+            } else if let frameSize = info.frameSize {
+                estimatedSize = frameSize * 2  // Estimate HEIC will be roughly 2x HEVC frame size
+                format = "heic"
+            } else {
+                estimatedSize = 0
+                format = "unknown"
+            }
+
+            return ThumbnailInfo(
+                size: estimatedSize,
+                format: format,
                 width: info.width,
                 height: info.height,
                 rotation: info.rotation.map { Int($0) }
@@ -39,7 +54,33 @@ public class Mp4Reader: ImageReader {
             throw ImageReaderError.indexOutOfBounds
         }
 
-        return infos[index].data
+        let info = infos[index]
+
+        // Return embedded thumbnail data directly
+        if let embeddedData = info.embeddedData {
+            return embeddedData
+        }
+
+        // Extract and convert first frame to HEIC
+        guard let frameOffset = info.frameOffset,
+            let frameSize = info.frameSize,
+            let videoTrackInfo = info.videoTrackInfo
+        else {
+            throw ImageReaderError.invalidData
+        }
+
+        // Read frame data
+        let frameData = try await reader.read(at: frameOffset, length: frameSize)
+
+        // Convert to HEIC
+        guard
+            let heicData = try await convertHevcFrameToHeic(
+                frameData: frameData, trackInfo: videoTrackInfo)
+        else {
+            throw ImageReaderError.invalidData
+        }
+
+        return heicData
     }
 
     public func getMetadata() async throws -> Metadata {
@@ -76,15 +117,15 @@ public class Mp4Reader: ImageReader {
         // Parse everything in one pass to avoid redundant operations
         let parsedInfo = parseAllMoovInfo(data: moovData)
 
-        // If no thumbnails found, try to extract first frame for video files
+        // If no thumbnails found, create placeholder for first frame extraction
         var finalThumbnails = parsedInfo.thumbnails
         if parsedInfo.thumbnails.isEmpty && parsedInfo.videoTrackInfo != nil {
-            logger.info("No embedded thumbnails found, attempting first frame extraction")
-            if let firstFrameThumbnail = try await extractFirstFrame(
+            logger.info("No embedded thumbnails found, preparing first frame extraction info")
+            if let firstFrameInfo = try await prepareFirstFrameInfo(
                 videoTrackInfo: parsedInfo.videoTrackInfo!)
             {
-                finalThumbnails = [firstFrameThumbnail]
-                logger.info("Successfully extracted first frame as thumbnail")
+                finalThumbnails = [firstFrameInfo]
+                logger.info("Successfully prepared first frame extraction info")
             }
         }
 
@@ -341,9 +382,10 @@ public class Mp4Reader: ImageReader {
         return Double(durationInTimescale) / Double(timescale)
     }
 
-    /// Extract first frame from video track as HEIC thumbnail
-    private func extractFirstFrame(videoTrackInfo: VideoTrackInfo) async throws -> Mp4ImageInfo? {
-        logger.debug("Starting first frame extraction")
+    /// Prepare first frame info without reading actual data
+    private func prepareFirstFrameInfo(videoTrackInfo: VideoTrackInfo) async throws -> Mp4ImageInfo?
+    {
+        logger.debug("Preparing first frame extraction info")
 
         // Find the media data offset for the first frame
         guard let firstFrameOffset = try await findFirstFrameOffset(trackInfo: videoTrackInfo)
@@ -352,29 +394,23 @@ public class Mp4Reader: ImageReader {
             return nil
         }
 
-        // Read the first frame data
-        guard
-            let frameData = try await readFirstFrameData(
-                at: firstFrameOffset, trackInfo: videoTrackInfo)
+        // Get the first frame size without reading the data
+        guard let frameSize = try await getFirstFrameSize(trackInfo: videoTrackInfo)
         else {
-            logger.error("Could not read first frame data")
+            logger.error("Could not get first frame size")
             return nil
         }
 
-        // Convert HEVC frame to HEIC format
-        guard
-            let heicData = try await convertHevcFrameToHeic(
-                frameData: frameData, trackInfo: videoTrackInfo)
-        else {
-            logger.error("Could not convert HEVC frame to HEIC")
-            return nil
-        }
+        logger.debug("Prepared first frame info: offset=\(firstFrameOffset), size=\(frameSize)")
 
         return Mp4ImageInfo(
-            data: heicData,
             width: videoTrackInfo.width,
             height: videoTrackInfo.height,
-            rotation: videoTrackInfo.rotation
+            rotation: videoTrackInfo.rotation,
+            embeddedData: nil,
+            frameOffset: firstFrameOffset,
+            frameSize: frameSize,
+            videoTrackInfo: videoTrackInfo
         )
     }
 
@@ -413,10 +449,8 @@ public class Mp4Reader: ImageReader {
         return chunkOffset
     }
 
-    /// Read the first frame data
-    private func readFirstFrameData(at offset: UInt64, trackInfo: VideoTrackInfo) async throws
-        -> Data?
-    {
+    /// Get the first frame size without reading data
+    private func getFirstFrameSize(trackInfo: VideoTrackInfo) async throws -> UInt32? {
         // Look for sample size information in stsz box
         guard let stszData = findBoxData(in: trackInfo.stblData, boxType: "stsz"),
             stszData.count >= 12
@@ -447,8 +481,8 @@ public class Mp4Reader: ImageReader {
             }
         }
 
-        logger.debug("Reading first frame: offset=\(offset), size=\(frameSize)")
-        return try await reader.read(at: offset, length: frameSize)
+        logger.debug("First frame size: \(frameSize)")
+        return frameSize
     }
 
     /// Convert HEVC frame data to HEIC format
@@ -690,10 +724,15 @@ public class Mp4Reader: ImageReader {
 // MARK: - MP4 Data Structures
 
 private struct Mp4ImageInfo {
-    let data: Data
     let width: UInt32?
     let height: UInt32?
     let rotation: Double?
+    // For embedded thumbnails
+    let embeddedData: Data?
+    // For first frame extraction
+    let frameOffset: UInt64?
+    let frameSize: UInt32?
+    let videoTrackInfo: VideoTrackInfo?
 }
 
 private struct VideoTrackInfo {
@@ -820,7 +859,8 @@ private func parseIlstBox(data: Data, rotation: Double?) -> [Mp4ImageInfo] {
         itemCount += 1
         if itemCount <= 10 {  // 只显示前10个item
             logger.debug(
-                "Item #\(itemCount): name='\(itemName)', size=\(itemSize), offset=\(offset)")
+                "Item #\(itemCount): name='\(itemName, privacy: .public)', size=\(itemSize), offset=\(offset)"
+            )
         }
 
         if itemName == "covr" {
@@ -871,7 +911,14 @@ private func extractImageFromItem(data: Data, rotation: Double?) -> Mp4ImageInfo
             if isJpegData(imageData) {
                 let (width, height) = extractJpegDimensions(data: imageData)
                 return Mp4ImageInfo(
-                    data: imageData, width: width, height: height, rotation: rotation)
+                    width: width,
+                    height: height,
+                    rotation: rotation,
+                    embeddedData: imageData,
+                    frameOffset: nil,
+                    frameSize: nil,
+                    videoTrackInfo: nil
+                )
             }
         }
 
@@ -988,14 +1035,29 @@ private func extractThumbnailFromBox(data: Data, rotation: Double?) -> Mp4ImageI
                     logger.debug("Found complete JPEG data, size: \(finalJpegData.count)")
                     let (width, height) = extractJpegDimensions(data: finalJpegData)
                     return Mp4ImageInfo(
-                        data: finalJpegData, width: width, height: height, rotation: rotation)
+                        width: width,
+                        height: height,
+                        rotation: rotation,
+                        embeddedData: finalJpegData,
+                        frameOffset: nil,
+                        frameSize: nil,
+                        videoTrackInfo: nil
+                    )
                 }
             }
 
             // 如果没有找到结束标记，使用剩余数据
             logger.debug("No JPEG end marker found, using remaining data")
             let (width, height) = extractJpegDimensions(data: jpegData)
-            return Mp4ImageInfo(data: jpegData, width: width, height: height, rotation: rotation)
+            return Mp4ImageInfo(
+                width: width,
+                height: height,
+                rotation: rotation,
+                embeddedData: jpegData,
+                frameOffset: nil,
+                frameSize: nil,
+                videoTrackInfo: nil
+            )
         }
     }
 
